@@ -65,6 +65,11 @@ PACKET_WINDOW = deque()  # Stores timestamps of recent packets
 LAST_ALERT_TIME = 0
 ALERT_COOLDOWN = 10  # Seconds between alerts to avoid spamming
 
+# Alert batching for SMS (simpler, cleaner messages)
+alert_batch = defaultdict(lambda: {'count': 0, 'last_time': 0, 'last_payload': '', 'type': '', 'source': ''})
+ALERT_BATCH_WINDOW = 10  # Seconds to batch similar alerts (reduced for faster notification)
+ALERT_BATCH_MAX_COUNT = 5  # Send immediately if this many alerts are batched
+
 # WebSocket and monitoring state
 connected_websockets = []
 packet_history = deque(maxlen=100)
@@ -172,7 +177,7 @@ async def log_requests(request: Request, call_next):
             logger.warning(f"🔴 {msg}")
             logger.warning(f"📊 Request details: {request.method} {request.url.path} | Query params: {str(request.url.query)[:100]}")
             add_alert("DDoS", client_ip, msg)
-            send_alert(msg)
+            send_alert_batched("DDoS", client_ip, f"{request.method} {request.url.path}")
             HTTP_REQUEST_LAST_DDOS_ALERT = current_time
     
     # Also track total request volume across all IPs for aggregate DDoS detection
@@ -190,7 +195,7 @@ async def log_requests(request: Request, call_next):
             msg = f"⚠️ ALERT: Large-scale DDoS Attack Detected! Total: {total_requests_last_second} requests/sec from multiple sources!"
             logger.warning(f"🔴 {msg}")
             add_alert("DDoS", "Multiple IPs", msg)
-            send_alert(msg)
+            send_alert_batched("DDoS", "Multiple IPs", f"{total_requests_last_second} req/sec")
             HTTP_REQUEST_LAST_DDOS_ALERT = current_time
     
     # Check for SQL injection in URL and query params
@@ -202,7 +207,7 @@ async def log_requests(request: Request, call_next):
         msg = f"⚠️ ALERT: SQL Injection from {client_ip}! Query: {clean_snippet}"
         logger.warning(msg)
         add_alert("SQL Injection", client_ip, msg)
-        send_alert(msg)
+        send_alert_batched("SQL Injection", client_ip, clean_snippet)
     
     # Broadcast update
     if event_loop and connected_websockets:
@@ -331,7 +336,7 @@ def process_packet(packet):
             msg = f"⚠️ ALERT: Potential DDoS Attack Detected! Traffic spike: {len(PACKET_WINDOW)} packets/sec."
             logger.warning(msg)
             add_alert("DDoS", src_ip, msg)
-            send_alert(msg)
+            send_alert_batched("DDoS", src_ip, f"{len(PACKET_WINDOW)} packets/sec")
             LAST_ALERT_TIME = current_time
 
     # 2. SQL Injection Detection
@@ -357,7 +362,7 @@ def process_packet(packet):
                     msg = f"⚠️ ALERT: SQL Injection from {src_ip}! Payload: {clean_snippet}..."
                     logger.warning(msg)
                     add_alert("SQL Injection", src_ip, msg)
-                    send_alert(msg)
+                    send_alert_batched("SQL Injection", src_ip, clean_snippet)
                     LAST_ALERT_TIME = current_time
         except Exception as e:
             pass # Ignore decoding errors
@@ -696,9 +701,109 @@ def start_sniffer():
 
 # --- BlueBubbles Integration ---
 
-def send_alert(message: str):
+def send_alert_batched(alert_type: str, source: str, payload: str):
     """
-    Sends a text message via BlueBubbles.
+    Batches similar alerts together for cleaner SMS messages.
+    Sends batched alert when window expires or new alert type appears.
+    """
+    global alert_batch
+    current_time = time.time()
+    
+    # Create a key for batching (same type + source)
+    batch_key = f"{alert_type}:{source}"
+    
+    # Clean up payload for display
+    try:
+        from urllib.parse import unquote
+        decoded = unquote(payload, encoding='utf-8', errors='ignore')
+        # Extract the suspicious part (usually after = or the main payload)
+        if '=' in decoded:
+            parts = decoded.split('&')
+            for part in parts:
+                if 'username' in part.lower() or 'user' in part.lower() or 'query' in part.lower():
+                    clean_payload = part.split('=')[-1] if '=' in part else part
+                    break
+            else:
+                clean_payload = decoded[:60]
+        else:
+            clean_payload = decoded[:60]
+    except:
+        clean_payload = payload[:60] if len(payload) > 60 else payload
+    
+    # Update batch
+    batch = alert_batch[batch_key]
+    time_since_last = current_time - batch['last_time']
+    
+    if batch['count'] == 0:
+        # First alert - send immediately
+        emoji = "🚨" if alert_type == "SQL Injection" else "⚠️"
+        message = f"{emoji} {alert_type} from {source}\n   {clean_payload}"
+        _send_alert_direct(message)
+        
+        # Start new batch
+        alert_batch[batch_key] = {
+            'count': 1,
+            'last_time': current_time,
+            'last_payload': clean_payload,
+            'type': alert_type,
+            'source': source
+        }
+    elif time_since_last > ALERT_BATCH_WINDOW:
+        # Window expired - send previous batch and start new one
+        if batch['count'] > 1:
+            count_text = f" ({batch['count']} attempts)"
+            emoji = "🚨" if alert_type == "SQL Injection" else "⚠️"
+            message = f"{emoji} {alert_type} from {source}\n   {batch['last_payload']}{count_text}"
+            _send_alert_direct(message)
+        
+        # Start new batch with current alert
+        emoji = "🚨" if alert_type == "SQL Injection" else "⚠️"
+        message = f"{emoji} {alert_type} from {source}\n   {clean_payload}"
+        _send_alert_direct(message)
+        
+        alert_batch[batch_key] = {
+            'count': 1,
+            'last_time': current_time,
+            'last_payload': clean_payload,
+            'type': alert_type,
+            'source': source
+        }
+    else:
+        # Add to existing batch
+        alert_batch[batch_key]['count'] += 1
+        alert_batch[batch_key]['last_time'] = current_time
+        # Update payload if this one is cleaner/shorter
+        if len(clean_payload) < len(batch['last_payload']) or not batch['last_payload']:
+            alert_batch[batch_key]['last_payload'] = clean_payload
+        
+        # If we've batched enough alerts, send immediately
+        if alert_batch[batch_key]['count'] >= ALERT_BATCH_MAX_COUNT:
+            count_text = f" ({alert_batch[batch_key]['count']} attempts)"
+            emoji = "🚨" if alert_type == "SQL Injection" else "⚠️"
+            message = f"{emoji} {alert_type} from {source}\n   {alert_batch[batch_key]['last_payload']}{count_text}"
+            _send_alert_direct(message)
+            # Reset batch
+            alert_batch[batch_key] = {'count': 0, 'last_time': 0, 'last_payload': '', 'type': '', 'source': ''}
+
+def flush_alert_batches():
+    """
+    Flush any pending batched alerts (call this periodically or on shutdown).
+    """
+    global alert_batch
+    current_time = time.time()
+    
+    for batch_key, batch in list(alert_batch.items()):
+        if batch['count'] > 0:
+            count_text = f" ({batch['count']} attempts)" if batch['count'] > 1 else ""
+            emoji = "🚨" if batch['type'] == "SQL Injection" else "⚠️"
+            message = f"{emoji} {batch['type']} from {batch['source']}\n   {batch['last_payload']}{count_text}"
+            _send_alert_direct(message)
+            # Reset batch
+            alert_batch[batch_key] = {'count': 0, 'last_time': 0, 'last_payload': '', 'type': '', 'source': ''}
+
+def _send_alert_direct(message: str):
+    """
+    Sends a text message directly via BlueBubbles (internal function).
     """
     global TARGET_CHAT_GUID
     
@@ -738,9 +843,16 @@ def send_alert(message: str):
     except requests.exceptions.ConnectionError as e:
         logger.error(f"Cannot connect to BlueBubbles at {BLUEBUBBLES_URL}. Is BlueBubbles server running? Error: {e}")
     except requests.exceptions.Timeout:
-        logger.error(f"Request to BlueBubbles timed out")
+        logger.error(f"Timeout sending alert to BlueBubbles")
     except Exception as e:
         logger.error(f"Failed to send alert: {e}")
+
+def send_alert(message: str):
+    """
+    Sends a text message via BlueBubbles (for non-alert messages like status updates).
+    Uses direct sending (no batching).
+    """
+    _send_alert_direct(message)
 
 # --- WebSocket Support ---
 
@@ -963,7 +1075,7 @@ async def login_endpoint(request: Request):
             msg = f"⚠️ ALERT: SQL Injection from {client_ip}! Username: {clean_snippet}"
             logger.warning(msg)
             add_alert("SQL Injection", client_ip, msg)
-            send_alert(msg)
+            send_alert_batched("SQL Injection", client_ip, clean_snippet)
         
         return {"status": "error", "message": "Invalid credentials"}
     except Exception as e:
@@ -2146,8 +2258,6 @@ async def handle_fix_command(chat_guid: str):
     """
     Handle the 'fix' command: analyze codebase, generate fixes, and create a PR.
     """
-    send_text_message(chat_guid, "🔍 Analyzing codebase for security vulnerabilities...")
-    
     # Check if any authentication method is available
     has_auth = False
     auth_method = None
@@ -2185,7 +2295,6 @@ async def handle_fix_command(chat_guid: str):
         if len(parts) >= 2:
             owner = parts[0]
             repo_name = parts[1]
-            send_text_message(chat_guid, f"📦 Repository: {owner}/{repo_name}")
         else:
             send_text_message(chat_guid, f"❌ Invalid repo format: {GITHUB_REPO}")
             send_text_message(chat_guid, "💡 Use format: https://github.com/owner/repo or owner/repo")
@@ -2203,7 +2312,7 @@ async def handle_fix_command(chat_guid: str):
     temp_dir = tempfile.mkdtemp(prefix='shieldos_fix_')
     repo_root = Path(temp_dir)
     
-    send_text_message(chat_guid, f"🔧 Cloning repository from {GITHUB_REPO}...")
+    send_text_message(chat_guid, f"🔧 Fixing {owner}/{repo_name}...")
     repo_str = GITHUB_REPO.strip()
     
     # Parse repo URL
@@ -2236,14 +2345,13 @@ async def handle_fix_command(chat_guid: str):
         subprocess.run(['git', 'config', 'user.email', 'shieldos@shieldos.ai'], check=True, capture_output=True, cwd=repo_root)
         logger.info("Configured git author as ShieldOS")
         # Now analyze the cloned codebase
-        send_text_message(chat_guid, f"🔍 Analyzing codebase...")
         codebase_analysis = await analyze_codebase_security(repo_root=repo_root)
         
         if not codebase_analysis.get("files"):
             send_text_message(chat_guid, "❌ No files found to analyze")
             return
         
-        send_text_message(chat_guid, f"🔧 Analyzing {len(codebase_analysis['files'])} file(s) and generating fixes...")
+        send_text_message(chat_guid, f"   Analyzing {len(codebase_analysis['files'])} files, generating fixes...")
         
         # Generate fixes using LLM (with fallback to different model on rate limit)
         fixes = None
@@ -2253,7 +2361,6 @@ async def handle_fix_command(chat_guid: str):
         model_name = None
         for model_name in models_to_try:
             try:
-                send_text_message(chat_guid, f"🤖 Using model: {model_name}...")
                 fixes = await generate_vulnerability_fixes(codebase_analysis, model=model_name)
                 if fixes:
                     break
@@ -2262,7 +2369,6 @@ async def handle_fix_command(chat_guid: str):
                 if "rate limit" in error_str or "429" in error_str:
                     logger.warning(f"Rate limit hit for {model_name}, trying next model...")
                     if model_name != models_to_try[-1]:
-                        send_text_message(chat_guid, f"⚠️ Rate limit on {model_name}, trying alternative model...")
                         continue
                     else:
                         send_text_message(chat_guid, f"❌ All models rate limited. Please wait and try again later.")
@@ -2303,7 +2409,6 @@ async def handle_fix_command(chat_guid: str):
             raise ValueError(f"Invalid repo format: {repo_str}")
         
         # Get default branch from GitHub API
-        send_text_message(chat_guid, f"🔍 Detecting default branch...")
         repo_info_url = f"https://api.github.com/repos/{owner}/{repo}"
         headers = get_github_auth_headers()
         repo_info = requests.get(repo_info_url, headers=headers, timeout=10)
@@ -2318,12 +2423,9 @@ async def handle_fix_command(chat_guid: str):
         base_branch = default_branch
         
         # Fetch latest from remote first
-        send_text_message(chat_guid, f"📥 Fetching latest from remote...")
         subprocess.run(['git', 'fetch', 'origin'], check=True, capture_output=True, cwd=repo_root)
         
         # Checkout the remote branch directly (don't try to create local main)
-        send_text_message(chat_guid, f"📂 Switching to {default_branch} branch...")
-        
         # Try to checkout the remote branch directly - this creates a local tracking branch
         checkout_result = subprocess.run(['git', 'checkout', '-b', default_branch, f'origin/{default_branch}'], check=False, capture_output=True, text=True, cwd=repo_root)
         
@@ -2342,8 +2444,6 @@ async def handle_fix_command(chat_guid: str):
         
         # Create a new branch from default branch
         branch_name = f"fix/security-vulnerabilities-{int(time.time())}"
-        send_text_message(chat_guid, f"🌿 Creating branch: {branch_name}")
-        
         subprocess.run(['git', 'checkout', '-b', branch_name], check=True, capture_output=True, cwd=repo_root)
         logger.info(f"Created branch: {branch_name} from {base_branch}")
         
@@ -2477,15 +2577,12 @@ async def handle_fix_command(chat_guid: str):
                     )
                     if install_result.returncode != 0:
                         logger.warning(f"npm install failed: {install_result.stderr[:500]}")
-                        send_text_message(chat_guid, f"⚠️ Dependency installation had issues, but continuing with build...")
                     else:
                         logger.info("✅ Dependencies installed successfully")
                 except subprocess.TimeoutExpired:
                     logger.warning("npm install timed out")
-                    send_text_message(chat_guid, f"⚠️ Dependency installation timed out, but continuing with build...")
                 except Exception as e:
                     logger.warning(f"Could not install dependencies: {e}")
-                    send_text_message(chat_guid, f"⚠️ Could not install dependencies, but continuing with build...")
             
             while not build_passed and attempt < max_build_fix_attempts:
                 attempt += 1
@@ -2501,14 +2598,11 @@ async def handle_fix_command(chat_guid: str):
                     if build_result.returncode == 0:
                         build_passed = True
                         logger.info("✅ Build check passed!")
-                        send_text_message(chat_guid, f"✅ Build check passed!")
                         break
                     else:
                         build_error = build_result.stderr + build_result.stdout
                         logger.warning(f"Build failed (attempt {attempt}/{max_build_fix_attempts}):")
                         logger.warning(build_error[:500])
-                        
-                        send_text_message(chat_guid, f"⚠️ Build failed (attempt {attempt}), fixing errors...")
                         
                         # Try to fix build errors using LLM (use same model that worked for fixes)
                         current_model = model_name if 'model_name' in locals() else "llama-3.3-70b-versatile"
@@ -2580,7 +2674,6 @@ async def handle_fix_command(chat_guid: str):
                     break
             
             if not build_passed and attempt >= max_build_fix_attempts:
-                send_text_message(chat_guid, f"⚠️ Build still failing after {max_build_fix_attempts} attempts. Proceeding anyway...")
                 logger.warning("Build failed after max attempts but proceeding with commit")
         else:
             # No package.json, skip build check
@@ -2588,7 +2681,8 @@ async def handle_fix_command(chat_guid: str):
             logger.info("No package.json found, skipping build check")
         
         # Stage and commit changes
-        send_text_message(chat_guid, f"💾 Committing fixes to {len(files_modified)} file(s)...")
+        build_status = "✅ Build passed" if build_passed else "⚠️ Build issues"
+        send_text_message(chat_guid, f"   {build_status}! Committing {len(files_modified)} files...")
         
         for file_path in files_modified:
             subprocess.run(['git', 'add', file_path], check=True, capture_output=True)
@@ -2607,7 +2701,6 @@ async def handle_fix_command(chat_guid: str):
         logger.info(f"Committed changes: {commit_message}")
         
         # Set up git remote to use the repo from .env (not the existing remote)
-        send_text_message(chat_guid, f"🔧 Configuring git remote...")
         repo_str = GITHUB_REPO.strip()
         
         # Parse repo URL
@@ -2628,7 +2721,6 @@ async def handle_fix_command(chat_guid: str):
         logger.info(f"Set git remote origin to: {remote_url}")
         
         # Push branch
-        send_text_message(chat_guid, f"📤 Pushing branch to {GITHUB_REPO}...")
         try:
             push_result = subprocess.run(['git', 'push', '-u', 'origin', branch_name], check=True, capture_output=True, text=True, timeout=30)
             logger.info(f"Pushed branch: {branch_name}")
@@ -2638,17 +2730,14 @@ async def handle_fix_command(chat_guid: str):
             time.sleep(5)
             
             # Create PR automatically using GitHub API
-            send_text_message(chat_guid, f"🔗 Creating Pull Request...")
             try:
                 # Use the base_branch we stored earlier (it's in the outer scope)
                 pr_summary = fixes.get('summary', 'Security vulnerabilities fixed')
                 pr_url = await create_github_pr(branch_name, pr_summary, files_modified, base_branch)
                 
                 if pr_url:
-                    send_text_message(chat_guid, f"✅ Fixes committed to branch: {branch_name}")
-                    send_text_message(chat_guid, f"📋 {pr_summary}")
-                    send_text_message(chat_guid, f"🎉 PR created successfully!")
-                    send_text_message(chat_guid, f"🔗 {pr_url}")
+                    send_text_message(chat_guid, f"🎉 PR created: {pr_url}")
+                    send_text_message(chat_guid, f"   {pr_summary}")
                 else:
                     send_text_message(chat_guid, f"⚠️ Failed to create PR automatically")
                     send_text_message(chat_guid, f"💡 Create manually: gh pr create --title 'Security Fix' --body '{pr_summary}'")
