@@ -123,7 +123,8 @@ from pydantic import BaseModel
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     """
-    Middleware to log all HTTP requests and detect attacks at application layer
+    Middleware to log all HTTP requests and detect attacks at application layer.
+    BLOCKS requests when threats are detected before they reach the application.
     """
     global event_loop, request_tracker, HTTP_REQUEST_LAST_DDOS_ALERT, DDOS_REQUEST_THRESHOLD, MONITORED_PORT, http_request_history
     
@@ -132,45 +133,62 @@ async def log_requests(request: Request, call_next):
     timestamp = datetime.now().isoformat()
     
     # Skip logging requests to config endpoints (they're not the traffic we're monitoring)
-    if request.url.path in ["/api/config", "/api/set-target", "/api/requests"]:
+    if request.url.path in ["/api/config", "/api/set-target", "/api/requests", "/vulnerable-login"]:
         response = await call_next(request)
         return response
-    
-    # Note: We don't capture body here to avoid consuming it
-    # Body content will be checked in specific endpoints (like /api/login)
-    body_content = None
     
     # Detect threats
     threat_type = None
     threat_details = None
     
-    # Check for SQL injection in URL, query params, and body
+    # Check for SQL injection in URL and query params first
     full_url = str(request.url)
     query_string = request.url.query
-    body_str = str(body_content) if body_content else ""
     
-    # Check query params
+    # Check query params for SQL injection
     if query_string and detect_sql_injection(query_string):
         threat_type = "SQL Injection"
         clean_snippet = ''.join(c if c.isprintable() else '' for c in query_string[:100])
         threat_details = f"Query: {clean_snippet}"
     
-    # Check body content
-    if not threat_type and body_content:
-        if isinstance(body_content, dict):
-            # Check all values in the body
-            for key, value in body_content.items():
-                if isinstance(value, str) and detect_sql_injection(value):
-                    threat_type = "SQL Injection"
-                    clean_snippet = ''.join(c if c.isprintable() else '' for c in str(value)[:100])
-                    threat_details = f"Body[{key}]: {clean_snippet}"
-                    break
-        elif isinstance(body_content, str) and detect_sql_injection(body_content):
-            threat_type = "SQL Injection"
-            clean_snippet = ''.join(c if c.isprintable() else '' for c in body_content[:100])
-            threat_details = f"Body: {clean_snippet}"
+    # Check request body for POST/PUT requests (especially /api/login)
+    body_content = None
+    body_bytes = None
+    body_bytes_consumed = False
+    if not threat_type and request.method in ["POST", "PUT", "PATCH"]:
+        try:
+            # Read body for threat detection
+            body_bytes = await request.body()
+            body_bytes_consumed = True
+            if body_bytes:
+                # Try to parse as JSON
+                try:
+                    import json
+                    body_content = json.loads(body_bytes.decode('utf-8'))
+                    # Check all string values in JSON body
+                    if isinstance(body_content, dict):
+                        for key, value in body_content.items():
+                            if isinstance(value, str) and detect_sql_injection(value):
+                                threat_type = "SQL Injection"
+                                clean_snippet = ''.join(c if c.isprintable() else '' for c in str(value)[:100])
+                                threat_details = f"Body[{key}]: {clean_snippet}"
+                                break
+                    elif isinstance(body_content, str) and detect_sql_injection(body_content):
+                        threat_type = "SQL Injection"
+                        clean_snippet = ''.join(c if c.isprintable() else '' for c in body_content[:100])
+                        threat_details = f"Body: {clean_snippet}"
+                except:
+                    # If not JSON, check as string
+                    body_str = body_bytes.decode('utf-8', errors='ignore')
+                    if detect_sql_injection(body_str):
+                        threat_type = "SQL Injection"
+                        clean_snippet = ''.join(c if c.isprintable() else '' for c in body_str[:100])
+                        threat_details = f"Body: {clean_snippet}"
+        except Exception as e:
+            logger.debug(f"Error reading body: {e}")
+            # Continue without body check if we can't read it
     
-    # Store the HTTP request
+    # Store the HTTP request (before blocking decision)
     request_record = {
         "method": request.method,
         "path": request.url.path,
@@ -183,7 +201,6 @@ async def log_requests(request: Request, call_next):
         "threat_details": threat_details,
         "url": full_url
     }
-    http_request_history.appendleft(request_record)
     
     # DDoS Detection at Application Layer - Track HTTP request volume per IP
     # Add current request timestamp to tracker for this IP
@@ -210,11 +227,7 @@ async def log_requests(request: Request, call_next):
             if not threat_type:  # Only set if not already SQL injection
                 threat_type = "DDoS"
                 threat_details = f"{request_count} requests/sec"
-            msg = f"⚠️ ALERT: DDoS Attack Detected from {client_ip}! {request_count} requests/sec (threshold: {DDOS_REQUEST_THRESHOLD}/sec)"
-            logger.warning(f"🔴 {msg}")
-            logger.warning(f"📊 Request details: {request.method} {request.url.path} | Query params: {str(request.url.query)[:100]}")
-            add_alert("DDoS", client_ip, msg)
-            send_alert_batched("DDoS", client_ip, f"{request.method} {request.url.path}")
+            # Note: Alert will be sent in blocking section below
             HTTP_REQUEST_LAST_DDOS_ALERT = current_time
     
     # Also track total request volume across all IPs for aggregate DDoS detection
@@ -230,23 +243,55 @@ async def log_requests(request: Request, call_next):
             if not threat_type:  # Only set if not already set
                 threat_type = "DDoS"
                 threat_details = f"Total: {total_requests_last_second} req/sec"
-            msg = f"⚠️ ALERT: Large-scale DDoS Attack Detected! Total: {total_requests_last_second} requests/sec from multiple sources!"
-            logger.warning(f"🔴 {msg}")
-            add_alert("DDoS", "Multiple IPs", msg)
-            send_alert_batched("DDoS", "Multiple IPs", f"{total_requests_last_second} req/sec")
+            # Note: Alert will be sent in blocking section below
             HTTP_REQUEST_LAST_DDOS_ALERT = current_time
     
-    # Update threat_type in request record if DDoS was detected
+    # Update threat_type in request record if threat was detected
     if threat_type:
         request_record["threat_type"] = threat_type
         request_record["threat_details"] = threat_details
     
-    # If SQL injection was detected, create alert
-    if threat_type == "SQL Injection":
-        msg = f"⚠️ ALERT: SQL Injection from {client_ip}! {threat_details}"
-        logger.warning(msg)
-        add_alert("SQL Injection", client_ip, msg)
-        send_alert_batched("SQL Injection", client_ip, threat_details or query_string[:50])
+    # 🛡️ SHIELDOS BLOCKING: If threat detected, BLOCK the request before it reaches the app
+    if threat_type:
+        # Mark request as blocked
+        request_record["blocked"] = True
+        request_record["blocked_by"] = "ShieldOS Firewall"
+        
+        logger.warning(f"🛡️ ShieldOS BLOCKED {threat_type} attack from {client_ip} to {request.url.path}")
+        http_request_history.appendleft(request_record)
+        
+        # Create blocking alert messages
+        if threat_type == "SQL Injection":
+            msg = f"🛡️ BLOCKED: SQL Injection from {client_ip}! {threat_details}"
+            logger.warning(msg)
+            add_alert("SQL Injection", client_ip, msg)
+            # Send blocking alert with explicit BLOCKED status
+            send_alert_batched_blocked("SQL Injection", client_ip, threat_details or query_string[:50])
+        elif threat_type == "DDoS":
+            msg = f"🛡️ BLOCKED: DDoS Attack from {client_ip}! {threat_details}"
+            logger.warning(msg)
+            add_alert("DDoS", client_ip, msg)
+            # Send blocking alert with explicit BLOCKED status
+            send_alert_batched_blocked("DDoS", client_ip, f"{request.method} {request.url.path}")
+        
+        # Broadcast update
+        if event_loop and connected_websockets:
+            try:
+                asyncio.run_coroutine_threadsafe(broadcast_update(), event_loop)
+            except:
+                pass
+        
+        # Return blocking page instead of allowing request through
+        blocking_html = render_blocking_page(
+            threat_type=threat_type,
+            client_ip=client_ip,
+            request_path=request.url.path,
+            threat_details=threat_details
+        )
+        return HTMLResponse(content=blocking_html, status_code=403)
+    
+    # No threat detected - allow request through
+    http_request_history.appendleft(request_record)
     
     # Broadcast update
     if event_loop and connected_websockets:
@@ -254,6 +299,23 @@ async def log_requests(request: Request, call_next):
             asyncio.run_coroutine_threadsafe(broadcast_update(), event_loop)
         except:
             pass
+    
+    # If we consumed the body, we need to recreate the request
+    # FastAPI endpoints can read the body again, but we need to make it available
+    # We'll use a workaround: store body in request state and create a receive function
+    if body_bytes_consumed and body_bytes and not threat_type:
+        # Store body in request state for endpoint to access
+        # Create a receive function that returns the body
+        body_sent = False
+        async def receive():
+            nonlocal body_sent
+            if not body_sent:
+                body_sent = True
+                return {"type": "http.request", "body": body_bytes}
+            return {"type": "http.request", "body": b""}
+        
+        # Replace the receive callable
+        request._receive = receive
     
     response = await call_next(request)
     return response
@@ -311,6 +373,51 @@ def detect_sql_injection(payload: str) -> bool:
         if re.search(pattern, payload, re.IGNORECASE):
             return True
     return False
+
+def render_blocking_page(threat_type: str, client_ip: str, request_path: str, threat_details: str = None) -> str:
+    """
+    Render the ShieldOS blocking page with threat information
+    """
+    template_path = Path(__file__).parent / "templates" / "shieldos_blocked.html"
+    
+    if not template_path.exists():
+        # Fallback simple HTML if template doesn't exist
+        return f"""
+        <!DOCTYPE html>
+        <html>
+        <head><title>ShieldOS - Threat Blocked</title></head>
+        <body style="font-family: Arial; text-align: center; padding: 50px; background: #0a0e27; color: #fff;">
+            <h1>🚫 Request Blocked by ShieldOS</h1>
+            <p>Threat Type: {threat_type}</p>
+            <p>Source IP: {client_ip}</p>
+            <p>Path: {request_path}</p>
+        </body>
+        </html>
+        """
+    
+    with open(template_path, 'r') as f:
+        template = f.read()
+    
+    # Replace placeholders
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+    template = template.replace("{{THREAT_TYPE}}", threat_type)
+    template = template.replace("{{CLIENT_IP}}", client_ip)
+    template = template.replace("{{REQUEST_PATH}}", request_path)
+    template = template.replace("{{TIMESTAMP}}", timestamp)
+    
+    if threat_details:
+        # Escape HTML in threat details
+        threat_details_escaped = threat_details.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        template = template.replace("{{THREAT_DETAILS}}", threat_details_escaped)
+        # Remove the conditional check since we have details
+        template = template.replace("{% if THREAT_DETAILS %}", "").replace("{% endif %}", "")
+    else:
+        # Remove the threat details row if no details
+        import re
+        template = re.sub(r'\{% if THREAT_DETAILS %}.*?{% endif %}', '', template, flags=re.DOTALL)
+        template = template.replace("{{THREAT_DETAILS}}", "")
+    
+    return template
 
 def process_packet(packet):
     global PACKET_WINDOW, LAST_ALERT_TIME, event_loop
@@ -835,6 +942,88 @@ def send_alert_batched(alert_type: str, source: str, payload: str):
             count_text = f" ({alert_batch[batch_key]['count']} attempts)"
             emoji = "🚨" if alert_type == "SQL Injection" else "⚠️"
             message = f"{emoji} {alert_type} from {source}\n   {alert_batch[batch_key]['last_payload']}{count_text}"
+            _send_alert_direct(message)
+            # Reset batch
+            alert_batch[batch_key] = {'count': 0, 'last_time': 0, 'last_payload': '', 'type': '', 'source': ''}
+
+def send_alert_batched_blocked(alert_type: str, source: str, payload: str):
+    """
+    Sends blocking alert with explicit BLOCKED status in the message.
+    Similar to send_alert_batched but emphasizes that the request was BLOCKED.
+    """
+    global alert_batch
+    current_time = time.time()
+    
+    # Create a key for batching (same type + source)
+    batch_key = f"{alert_type}:{source}:blocked"
+    
+    # Clean up payload for display
+    try:
+        from urllib.parse import unquote
+        decoded = unquote(payload, encoding='utf-8', errors='ignore')
+        if '=' in decoded:
+            parts = decoded.split('&')
+            for part in parts:
+                if 'username' in part.lower() or 'user' in part.lower() or 'query' in part.lower():
+                    clean_payload = part.split('=')[-1] if '=' in part else part
+                    break
+            else:
+                clean_payload = decoded[:60]
+        else:
+            clean_payload = decoded[:60]
+    except:
+        clean_payload = payload[:60] if len(payload) > 60 else payload
+    
+    # Update batch
+    batch = alert_batch[batch_key]
+    time_since_last = current_time - batch['last_time']
+    
+    if batch['count'] == 0:
+        # First alert - send immediately with BLOCKED status
+        emoji = "🛡️"
+        message = f"{emoji} ShieldOS BLOCKED {alert_type} from {source}\n   Payload: {clean_payload}\n   ✅ Request blocked before reaching application"
+        _send_alert_direct(message)
+        
+        # Start new batch
+        alert_batch[batch_key] = {
+            'count': 1,
+            'last_time': current_time,
+            'last_payload': clean_payload,
+            'type': alert_type,
+            'source': source
+        }
+    elif time_since_last > ALERT_BATCH_WINDOW:
+        # Window expired - send previous batch and start new one
+        if batch['count'] > 1:
+            count_text = f" ({batch['count']} blocked)"
+            emoji = "🛡️"
+            message = f"{emoji} ShieldOS BLOCKED {batch['type']} from {batch['source']}\n   {batch['last_payload']}{count_text}\n   ✅ All requests blocked"
+            _send_alert_direct(message)
+        
+        # Start new batch with current alert
+        emoji = "🛡️"
+        message = f"{emoji} ShieldOS BLOCKED {alert_type} from {source}\n   Payload: {clean_payload}\n   ✅ Request blocked before reaching application"
+        _send_alert_direct(message)
+        
+        alert_batch[batch_key] = {
+            'count': 1,
+            'last_time': current_time,
+            'last_payload': clean_payload,
+            'type': alert_type,
+            'source': source
+        }
+    else:
+        # Add to existing batch
+        alert_batch[batch_key]['count'] += 1
+        alert_batch[batch_key]['last_time'] = current_time
+        if len(clean_payload) < len(batch['last_payload']) or not batch['last_payload']:
+            alert_batch[batch_key]['last_payload'] = clean_payload
+        
+        # If we've batched enough alerts, send immediately
+        if alert_batch[batch_key]['count'] >= ALERT_BATCH_MAX_COUNT:
+            count_text = f" ({alert_batch[batch_key]['count']} blocked)"
+            emoji = "🛡️"
+            message = f"{emoji} ShieldOS BLOCKED {alert_type} from {source}\n   {alert_batch[batch_key]['last_payload']}{count_text}\n   ✅ All requests blocked"
             _send_alert_direct(message)
             # Reset batch
             alert_batch[batch_key] = {'count': 0, 'last_time': 0, 'last_payload': '', 'type': '', 'source': ''}

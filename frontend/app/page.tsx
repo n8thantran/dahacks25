@@ -52,6 +52,8 @@ interface HttpRequest {
   threat_type?: string;
   threat_details?: string;
   url: string;
+  blocked?: boolean;
+  blocked_by?: string;
 }
 
 export default function Home() {
@@ -637,12 +639,17 @@ export default function Home() {
                   {httpRequests.map((req, i) => {
                     const isThreat = req.threat_type !== null && req.threat_type !== undefined;
                     const isSqlInjection = req.threat_type === 'SQL Injection';
+                    const isBlocked = req.blocked === true;
                     
                     return (
                       <div
                         key={i}
                         className={`border rounded-lg p-4 transition-colors ${
-                          isSqlInjection
+                          isBlocked && isSqlInjection
+                            ? 'bg-red-950/40 border-red-700/60 hover:bg-red-950/50 ring-2 ring-red-600/30'
+                            : isBlocked
+                            ? 'bg-yellow-950/30 border-yellow-700/60 hover:bg-yellow-950/40 ring-2 ring-yellow-600/30'
+                            : isSqlInjection
                             ? 'bg-red-950/30 border-red-600/50 hover:bg-red-950/40'
                             : isThreat
                             ? 'bg-yellow-950/20 border-yellow-600/50 hover:bg-yellow-950/30'
@@ -662,13 +669,31 @@ export default function Home() {
                             {req.query && (
                               <span className="text-gray-400 text-xs">?{req.query.substring(0, 50)}{req.query.length > 50 ? '...' : ''}</span>
                             )}
-                            {isThreat && (
+                            {isBlocked && (
+                              <span className={`px-2 py-0.5 rounded text-xs font-bold animate-pulse ${
+                                isSqlInjection
+                                  ? 'bg-red-700 text-white'
+                                  : 'bg-yellow-700 text-white'
+                              }`}>
+                                🛡️ BLOCKED
+                              </span>
+                            )}
+                            {isThreat && !isBlocked && (
                               <span className={`px-2 py-0.5 rounded text-xs font-bold ${
                                 isSqlInjection
-                                  ? 'bg-red-600 text-white animate-pulse'
+                                  ? 'bg-red-600 text-white'
                                   : 'bg-yellow-600 text-black'
                               }`}>
                                 ⚠️ {req.threat_type}
+                              </span>
+                            )}
+                            {isThreat && isBlocked && (
+                              <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                                isSqlInjection
+                                  ? 'bg-red-600 text-white'
+                                  : 'bg-yellow-600 text-black'
+                              }`}>
+                                {req.threat_type}
                               </span>
                             )}
                           </div>
@@ -682,6 +707,14 @@ export default function Home() {
                             <span className="text-gray-500">IP:</span>
                             <span className="text-cyan-400 ml-1 font-mono">{req.client_ip}</span>
                           </div>
+                          {isBlocked && (
+                            <div className="col-span-2">
+                              <span className="text-gray-500">Status:</span>
+                              <span className="ml-1 text-red-400 font-bold">
+                                🛡️ Blocked by {req.blocked_by || 'ShieldOS'} - Request never reached application
+                              </span>
+                            </div>
+                          )}
                           {isThreat && req.threat_details && (
                             <div className="col-span-2">
                               <span className="text-gray-500">Threat:</span>
