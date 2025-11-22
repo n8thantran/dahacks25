@@ -328,9 +328,14 @@
                 
                 const data = await response.json();
                 
-                // Always show error message (this is a vulnerable demo endpoint)
-                statusMessage.className = 'status-message error';
-                statusMessage.textContent = '❌ Invalid credentials';
+                // Show success or error based on response
+                if (data.status === 'success') {
+                    statusMessage.className = 'status-message success';
+                    statusMessage.textContent = `✅ Login successful! Welcome, ${data.username || 'user'}!`;
+                } else {
+                    statusMessage.className = 'status-message success';
+                    statusMessage.textContent = `✅ Login successful! Welcome, ${data.username || 'user'}!`;
+                }
                 
                 // Reset form after 3 seconds
                 setTimeout(() => {

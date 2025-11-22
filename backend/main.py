@@ -10,8 +10,13 @@ from dotenv import load_dotenv
 import base64
 from datetime import datetime, timedelta
 
+# Configure logging first (before using logger)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Load environment variables
-load_dotenv()
+load_dotenv(override=True)  # override=True ensures .env values take precedence
+logger.info("Environment variables loaded from .env file")
 
 from collections import deque, defaultdict
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, WebSocket, WebSocketDisconnect
@@ -22,10 +27,6 @@ from scapy.all import sniff, IP, TCP, UDP, Raw, conf
 import asyncio
 from datetime import datetime
 from pathlib import Path
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # GitHub App authentication
 try:
@@ -133,9 +134,14 @@ async def log_requests(request: Request, call_next):
     timestamp = datetime.now().isoformat()
     
     # Skip logging requests to config endpoints (they're not the traffic we're monitoring)
+    # Also skip body reading for /api/login - let the endpoint handle it to avoid body consumption issues
     if request.url.path in ["/api/config", "/api/set-target", "/api/requests", "/vulnerable-login"]:
         response = await call_next(request)
         return response
+    
+    # For /api/login, only check query params, not body (to avoid body consumption issues)
+    # The endpoint will check the body itself
+    skip_body_check = request.url.path == "/api/login"
     
     # Detect threats
     threat_type = None
@@ -151,11 +157,11 @@ async def log_requests(request: Request, call_next):
         clean_snippet = ''.join(c if c.isprintable() else '' for c in query_string[:100])
         threat_details = f"Query: {clean_snippet}"
     
-    # Check request body for POST/PUT requests (especially /api/login)
+    # Check request body for POST/PUT requests (but skip /api/login to avoid body consumption issues)
     body_content = None
     body_bytes = None
     body_bytes_consumed = False
-    if not threat_type and request.method in ["POST", "PUT", "PATCH"]:
+    if not threat_type and request.method in ["POST", "PUT", "PATCH"] and not skip_body_check:
         try:
             # Read body for threat detection
             body_bytes = await request.body()
@@ -304,13 +310,13 @@ async def log_requests(request: Request, call_next):
     # FastAPI endpoints can read the body again, but we need to make it available
     # We'll use a workaround: store body in request state and create a receive function
     if body_bytes_consumed and body_bytes and not threat_type:
-        # Store body in request state for endpoint to access
+        # Store body in request scope so endpoint can access it
         # Create a receive function that returns the body
-        body_sent = False
+        body_sent = [False]  # Use list to allow modification in closure
+        
         async def receive():
-            nonlocal body_sent
-            if not body_sent:
-                body_sent = True
+            if not body_sent[0]:
+                body_sent[0] = True
                 return {"type": "http.request", "body": body_bytes}
             return {"type": "http.request", "body": b""}
         
@@ -1366,7 +1372,8 @@ async def login_endpoint(request: Request):
             }
             http_request_history.appendleft(request_record)
         
-        return {"status": "error", "message": "Invalid credentials"}
+        # Accept any login credentials (vulnerable demo endpoint)
+        return {"status": "success", "message": "Login successful", "username": username}
     except Exception as e:
         logger.error(f"Login error: {e}")
         return {"status": "error", "message": "Server error"}
@@ -1933,6 +1940,9 @@ async def fix_build_errors(codebase_analysis: dict, build_error: str, original_f
     if var_match:
         variable_name = var_match.group(1)
     
+    # Check for "Return statement is not allowed here" error
+    return_statement_error = "Return statement is not allowed here" in build_error or "return" in build_error.lower() and "not allowed" in build_error.lower()
+    
     if not GROQ_AVAILABLE or not GROQ_API_KEY:
         # Return metadata for direct fixing
         result = {'files': {}, '_variable_name': variable_name, '_problematic_file': problematic_file}
@@ -1968,7 +1978,7 @@ TASK:
 Fix the build errors shown above. Common issues:
 - Variable redefinition (check for duplicate variable names) - THIS IS THE CURRENT ISSUE
 - Missing imports
-- Syntax errors
+- Syntax errors (especially "Return statement is not allowed here" - this means a return is outside a function or in wrong scope)
 - Type errors
 
 IMPORTANT FOR VARIABLE REDEFINITION ERRORS:
@@ -1976,6 +1986,13 @@ IMPORTANT FOR VARIABLE REDEFINITION ERRORS:
 - Rename each instance to a unique, descriptive name
 - Ensure the renamed variables make sense in context
 - If the variable is used in multiple scopes, you may be able to reuse the name in different scopes, but NOT in the same scope
+
+IMPORTANT FOR "RETURN STATEMENT NOT ALLOWED" ERRORS:
+- A return statement must be inside a function body
+- Check if the return is accidentally outside a function or inside a nested block incorrectly
+- Ensure proper function structure: export async function handler() {{ ... return ... }}
+- If return is in a conditional, ensure it's properly scoped within the function
+- Read the FULL file context to understand the function structure
 
 Return ONLY the fixes in JSON format:
 {{
@@ -1991,10 +2008,12 @@ Return ONLY the fixes in JSON format:
 
 CRITICAL:
 - Fix variable name conflicts by renaming ALL instances appropriately
+- Fix "Return statement not allowed" errors by ensuring return is inside proper function scope
 - Ensure all code is syntactically correct
 - Only fix the specific errors shown
 - Return valid JSON with proper escaping
-- For variable conflicts: show the FULL context where the variable is defined multiple times"""
+- For variable conflicts: show the FULL context where the variable is defined multiple times
+- For return statement errors: show the FULL function context and fix the scope issue"""
 
         response = client.chat.completions.create(
             model=model,
@@ -2382,9 +2401,18 @@ def get_github_auth_headers() -> dict:
     Get GitHub API authentication headers.
     Prefers GitHub App over Personal Access Token.
     """
-    if GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY and GITHUB_APP_INSTALLATION_ID:
+    # Check for GitHub App credentials (must be non-empty strings)
+    has_app_creds = (
+        GITHUB_APP_ID and GITHUB_APP_ID.strip() and
+        GITHUB_APP_PRIVATE_KEY and GITHUB_APP_PRIVATE_KEY.strip() and
+        GITHUB_APP_INSTALLATION_ID and GITHUB_APP_INSTALLATION_ID.strip()
+    )
+    
+    if has_app_creds:
         try:
+            logger.info("Attempting GitHub App authentication...")
             token = get_github_installation_token()
+            logger.info("GitHub App authentication successful")
             return {
                 'Authorization': f'token {token}',
                 'Accept': 'application/vnd.github.v3+json'
@@ -2392,13 +2420,22 @@ def get_github_auth_headers() -> dict:
         except Exception as e:
             logger.warning(f"GitHub App authentication failed, falling back to token: {e}")
     
-    if GITHUB_TOKEN:
+    # Check for Personal Access Token (must be non-empty string)
+    if GITHUB_TOKEN and GITHUB_TOKEN.strip():
+        logger.info("Using GitHub Personal Access Token for authentication")
         return {
             'Authorization': f'token {GITHUB_TOKEN}',
             'Accept': 'application/vnd.github.v3+json'
         }
     
-    raise ValueError("No GitHub authentication method available. Set either GITHUB_TOKEN or GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, and GITHUB_APP_INSTALLATION_ID")
+    # Log what we found for debugging
+    logger.error("GitHub authentication check failed:")
+    logger.error(f"  GITHUB_TOKEN: {'SET' if GITHUB_TOKEN else 'NOT SET'}")
+    logger.error(f"  GITHUB_APP_ID: {'SET' if GITHUB_APP_ID else 'NOT SET'}")
+    logger.error(f"  GITHUB_APP_PRIVATE_KEY: {'SET' if GITHUB_APP_PRIVATE_KEY else 'NOT SET'}")
+    logger.error(f"  GITHUB_APP_INSTALLATION_ID: {'SET' if GITHUB_APP_INSTALLATION_ID else 'NOT SET'}")
+    
+    raise ValueError("No GitHub authentication method available. Set either GITHUB_TOKEN or GitHub App credentials (GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, GITHUB_APP_INSTALLATION_ID) in .env")
 
 async def create_github_pr(branch_name: str, summary: str, files_modified: list, base_branch: str = 'main') -> str:
     """
@@ -2411,11 +2448,24 @@ async def create_github_pr(branch_name: str, summary: str, files_modified: list,
         files_modified: List of files that were modified
         base_branch: Base branch to merge into (default: 'main')
     """
+    # Reload environment variables to ensure we have the latest values
+    global GITHUB_TOKEN, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, GITHUB_APP_INSTALLATION_ID, GITHUB_REPO
+    load_dotenv(override=True)
+    GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
+    GITHUB_APP_ID = os.getenv('GITHUB_APP_ID')
+    GITHUB_APP_PRIVATE_KEY = os.getenv('GITHUB_APP_PRIVATE_KEY')
+    GITHUB_APP_INSTALLATION_ID = os.getenv('GITHUB_APP_INSTALLATION_ID')
+    GITHUB_REPO = os.getenv('GITHUB_REPO')
+    
     # Check if any authentication method is available
     try:
         headers = get_github_auth_headers()
+        logger.info("GitHub authentication headers obtained successfully")
     except ValueError as e:
-        logger.warning(str(e))
+        logger.error(f"GitHub authentication failed: {e}")
+        logger.error("Please check your .env file and ensure one of the following is set:")
+        logger.error("  - GITHUB_TOKEN (Personal Access Token)")
+        logger.error("  - OR GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, GITHUB_APP_INSTALLATION_ID (GitHub App)")
         raise ValueError("GitHub authentication required. Set GITHUB_TOKEN or GitHub App credentials (GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, GITHUB_APP_INSTALLATION_ID) in .env")
     
     try:
@@ -2425,6 +2475,7 @@ async def create_github_pr(branch_name: str, summary: str, files_modified: list,
         
         # Parse repo from URL or owner/repo format
         repo_str = GITHUB_REPO.strip()
+        logger.info(f"Parsing GitHub repo from: {repo_str}")
         
         # Handle full URL format: https://github.com/owner/repo or github.com/owner/repo
         if 'github.com' in repo_str:
@@ -2448,20 +2499,46 @@ async def create_github_pr(branch_name: str, summary: str, files_modified: list,
             else:
                 raise ValueError(f"Invalid GitHub repo format: {repo_str}. Expected format: 'https://github.com/owner/repo' or 'owner/repo'")
         
+        logger.info(f"Using GitHub repository: {owner}/{repo}")
+        
         # Headers already set by get_github_auth_headers() above
         headers['Content-Type'] = 'application/json'
         
-        # Verify base branch exists on remote
+        # Verify base branch exists on remote (with retries and longer timeout)
         base_branch_check_url = f"https://api.github.com/repos/{owner}/{repo}/branches/{base_branch}"
-        base_check = requests.get(base_branch_check_url, headers=headers, timeout=10)
-        if not base_check.ok:
+        base_check = None
+        max_retries = 3
+        timeout = 30  # Increased timeout
+        
+        for attempt in range(max_retries):
+            try:
+                base_check = requests.get(base_branch_check_url, headers=headers, timeout=timeout)
+                if base_check.ok:
+                    break
+                elif base_check.status_code == 404:
+                    # Branch doesn't exist, try alternatives
+                    break
+            except (requests.exceptions.ConnectTimeout, requests.exceptions.Timeout) as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Connection timeout (attempt {attempt + 1}/{max_retries}), retrying in 5 seconds...")
+                    time.sleep(5)
+                else:
+                    raise Exception(f"Failed to connect to GitHub API after {max_retries} attempts: {e}")
+            except Exception as e:
+                logger.error(f"Error checking base branch: {e}")
+                raise
+        
+        if base_check and not base_check.ok:
             logger.warning(f"Base branch {base_branch} not found on remote. Trying 'main'...")
             base_branch = 'main'
             base_branch_check_url = f"https://api.github.com/repos/{owner}/{repo}/branches/{base_branch}"
-            base_check = requests.get(base_branch_check_url, headers=headers, timeout=10)
-            if not base_check.ok:
-                logger.warning(f"Branch 'main' not found. Trying 'master'...")
-                base_branch = 'master'
+            try:
+                base_check = requests.get(base_branch_check_url, headers=headers, timeout=timeout)
+                if not base_check.ok:
+                    logger.warning(f"Branch 'main' not found. Trying 'master'...")
+                    base_branch = 'master'
+            except Exception as e:
+                logger.warning(f"Could not verify branch, proceeding with {base_branch}: {e}")
         
         logger.info(f"Using base branch: {base_branch} for PR: {owner}/{repo}")
         
@@ -2500,23 +2577,37 @@ Security vulnerabilities were identified during codebase analysis and have been 
         
         api_url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
         
-        # Verify branch exists on remote first (with retries)
+        # Verify branch exists on remote first (with retries and longer timeout)
         branch_check_url = f"https://api.github.com/repos/{owner}/{repo}/branches/{branch_name}"
         max_retries = 5
         retry_delay = 3
+        timeout = 30  # Increased timeout
         
+        branch_check = None
         for attempt in range(max_retries):
-            branch_check = requests.get(branch_check_url, headers=headers, timeout=10)
-            if branch_check.ok:
-                logger.info(f"Branch {branch_name} verified on remote")
-                break
-            else:
-                if attempt < max_retries - 1:
+            try:
+                branch_check = requests.get(branch_check_url, headers=headers, timeout=timeout)
+                if branch_check.ok:
+                    logger.info(f"Branch {branch_name} verified on remote")
+                    break
+                elif attempt < max_retries - 1:
                     logger.warning(f"Branch {branch_name} not found on remote yet. Waiting {retry_delay}s (attempt {attempt + 1}/{max_retries})...")
                     time.sleep(retry_delay)
                 else:
-                    error_detail = branch_check.text[:200] if branch_check.text else "Unknown error"
+                    error_detail = branch_check.text[:200] if branch_check and branch_check.text else "Unknown error"
                     raise Exception(f"Branch {branch_name} does not exist on remote after {max_retries} attempts. Push may have failed. Error: {error_detail}")
+            except (requests.exceptions.ConnectTimeout, requests.exceptions.Timeout) as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Connection timeout (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    raise Exception(f"Failed to connect to GitHub API after {max_retries} attempts: {e}")
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Error checking branch (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
+                    time.sleep(retry_delay)
+                else:
+                    raise
         
         # For same-repo PRs, head should be just the branch name
         # GitHub API format: for same repo use just branch name, for forks use owner:branch
@@ -2529,7 +2620,25 @@ Security vulnerabilities were identified during codebase analysis and have been 
         
         logger.info(f"Creating PR: {owner}/{repo} ({branch_name} -> {base_branch})")
         logger.debug(f"PR payload: {payload}")
-        response = requests.post(api_url, json=payload, headers=headers, timeout=10)
+        
+        # Create PR with retries and longer timeout
+        response = None
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(api_url, json=payload, headers=headers, timeout=timeout)
+                break
+            except (requests.exceptions.ConnectTimeout, requests.exceptions.Timeout) as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Connection timeout creating PR (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    raise Exception(f"Failed to create PR: Connection timeout after {max_retries} attempts. Error: {e}")
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Error creating PR (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
+                    time.sleep(retry_delay)
+                else:
+                    raise
         
         # If head is invalid, try with owner:branch format (sometimes needed even for same repo)
         if not response.ok and response.status_code == 422:
@@ -2861,7 +2970,7 @@ async def handle_fix_command(chat_guid: str):
         # Run build check to ensure code compiles - keep fixing until it passes
         send_text_message(chat_guid, f"🔨 Running build check...")
         build_passed = False
-        max_build_fix_attempts = 10  # Maximum attempts to avoid infinite loops
+        max_build_fix_attempts = 50  # Increased from 10 to 50 - keep trying until fixed
         attempt = 0
         
         # Check if package.json exists (Node.js project)
@@ -2907,6 +3016,12 @@ async def handle_fix_command(chat_guid: str):
                         build_error = build_result.stderr + build_result.stdout
                         logger.warning(f"Build failed (attempt {attempt}/{max_build_fix_attempts}):")
                         logger.warning(build_error[:500])
+                        
+                        # Add delay between retries to avoid rate limiting (especially for Groq API)
+                        if attempt > 1:
+                            delay = min(2 * attempt, 10)  # Exponential backoff, max 10 seconds
+                            logger.info(f"Waiting {delay} seconds before retry to avoid rate limiting...")
+                            time.sleep(delay)
                         
                         # Try to fix build errors using LLM (use same model that worked for fixes)
                         current_model = model_name if 'model_name' in locals() else "llama-3.3-70b-versatile"
@@ -2978,7 +3093,9 @@ async def handle_fix_command(chat_guid: str):
                     break
             
             if not build_passed and attempt >= max_build_fix_attempts:
-                logger.warning("Build failed after max attempts but proceeding with commit")
+                logger.error(f"Build failed after {max_build_fix_attempts} attempts. This should not happen - consider increasing max_build_fix_attempts")
+                send_text_message(chat_guid, f"⚠️ Build failed after {max_build_fix_attempts} attempts. Proceeding with commit anyway...")
+                # Don't break - continue to commit and create PR
         else:
             # No package.json, skip build check
             build_passed = True
@@ -3037,14 +3154,22 @@ async def handle_fix_command(chat_guid: str):
             try:
                 # Use the base_branch we stored earlier (it's in the outer scope)
                 pr_summary = fixes.get('summary', 'Security vulnerabilities fixed')
+                logger.info(f"Attempting to create PR with summary: {pr_summary[:100]}...")
                 pr_url = await create_github_pr(branch_name, pr_summary, files_modified, base_branch)
                 
                 if pr_url:
+                    logger.info(f"✅ PR created successfully: {pr_url}")
                     send_text_message(chat_guid, f"🎉 PR created: {pr_url}")
                     send_text_message(chat_guid, f"   {pr_summary}")
                 else:
+                    logger.warning("PR creation returned None/empty URL")
                     send_text_message(chat_guid, f"⚠️ Failed to create PR automatically")
                     send_text_message(chat_guid, f"💡 Create manually: gh pr create --title 'Security Fix' --body '{pr_summary}'")
+            except Exception as pr_error:
+                logger.error(f"PR creation failed: {pr_error}", exc_info=True)
+                send_text_message(chat_guid, f"⚠️ PR creation failed: {str(pr_error)[:200]}")
+                send_text_message(chat_guid, f"💡 Create manually: gh pr create --title 'Security Fix' --body '{pr_summary}'")
+                # Don't raise - we've already committed and pushed, so continue
             except Exception as pr_error:
                 logger.error(f"PR creation failed: {pr_error}")
                 send_text_message(chat_guid, f"⚠️ PR creation failed: {str(pr_error)[:100]}")
