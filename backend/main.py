@@ -1436,75 +1436,169 @@ async def analyze_codebase_security(repo_root: Path = None) -> dict:
         "repo_root": str(repo_root)
     }
 
+def fix_variable_conflict_direct(file_path: Path, variable_name: str) -> bool:
+    """
+    Directly fix variable name conflicts by renaming all instances.
+    Returns True if fix was applied, False otherwise.
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Find all variable declarations and usages
+        # Pattern to match: const/let/var variable_name = ... or variable_name = ... or variable_name.
+        var_pattern = re.compile(rf'\b{re.escape(variable_name)}\b')
+        matches = list(var_pattern.finditer(content))
+        
+        if len(matches) <= 1:
+            return False  # Not a conflict or already fixed
+        
+        # Analyze context to determine which instances to rename
+        # We'll rename all but the first declaration
+        lines = content.split('\n')
+        renamed_count = 0
+        result_parts = []
+        last_pos = 0
+        
+        for idx, match in enumerate(matches):
+            start, end = match.span()
+            
+            # Check if this is a declaration (const/let/var before it)
+            before_match = content[max(0, start-20):start]
+            is_declaration = bool(re.search(r'\b(const|let|var)\s+$', before_match))
+            
+            # Keep first declaration as-is, rename others
+            if idx == 0 or not is_declaration:
+                # Keep original
+                result_parts.append(content[last_pos:end])
+            else:
+                # Rename this instance
+                result_parts.append(content[last_pos:start])
+                # Use descriptive names based on context
+                if idx == 1:
+                    new_name = f"{variable_name}Result"
+                elif idx == 2:
+                    new_name = f"{variable_name}Data"
+                else:
+                    new_name = f"{variable_name}{idx}"
+                result_parts.append(new_name)
+                renamed_count += 1
+            
+            last_pos = end
+        
+        result_parts.append(content[last_pos:])
+        
+        if renamed_count > 0:
+            fixed_content = ''.join(result_parts)
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(fixed_content)
+            logger.info(f"Directly fixed {renamed_count} variable conflicts for '{variable_name}' in {file_path}")
+            return True
+        
+        return False
+    except Exception as e:
+        logger.error(f"Error in direct variable fix: {e}")
+        return False
+
 async def fix_build_errors(codebase_analysis: dict, build_error: str, original_fixes: dict, repo_root: Path, model: str = "llama-3.3-70b-versatile") -> dict:
     """
     Use LLM to fix build errors found during npm run build.
+    Returns dict with variable_name extracted for direct fixing if LLM fails.
     """
+    # Extract variable name and problematic file early for fallback
+    import re
+    error_file_match = re.search(r'\./([\w/.-]+\.(js|ts|tsx|jsx))', build_error)
+    problematic_file = None
+    if error_file_match:
+        problematic_file = error_file_match.group(1)
+    
+    variable_name = None
+    var_match = re.search(r'the name `(\w+)` is defined multiple times', build_error)
+    if var_match:
+        variable_name = var_match.group(1)
+    
     if not GROQ_AVAILABLE or not GROQ_API_KEY:
-        return None
+        # Return metadata for direct fixing
+        result = {'files': {}, '_variable_name': variable_name, '_problematic_file': problematic_file}
+        return result
     
     try:
         client = Groq(api_key=GROQ_API_KEY)
         
-        # Get the files that were modified
+        # Get the files that were modified - read FULL content for problematic files
         modified_files_context = ""
         for file_path, file_data in original_fixes.get('files', {}).items():
             full_path = repo_root / file_path
             if full_path.exists():
                 with open(full_path, 'r', encoding='utf-8') as f:
                     content = f.read()
-                    modified_files_context += f"\n\n--- {file_path} ---\n{content[:2000]}"
+                    # Read full file if it's the problematic one, otherwise limit to 3000 chars
+                    if file_path == problematic_file or problematic_file is None:
+                        modified_files_context += f"\n\n--- {file_path} (FULL FILE) ---\n{content}"
+                    else:
+                        modified_files_context += f"\n\n--- {file_path} ---\n{content[:3000]}"
         
         context = f"""You are fixing build errors in code that was just modified.
 
 BUILD ERROR:
-{build_error[:1000]}
+{build_error[:2000]}
+
+{f"CRITICAL: The variable '{variable_name}' is defined multiple times. You MUST find ALL instances of this variable and rename them to unique names (e.g., {variable_name}1, {variable_name}2, or more descriptive names like {variable_name}Result, {variable_name}Data, etc.)." if variable_name else ""}
 
 MODIFIED FILES:
 {modified_files_context}
 
 TASK:
 Fix the build errors shown above. Common issues:
-- Variable redefinition (check for duplicate variable names)
+- Variable redefinition (check for duplicate variable names) - THIS IS THE CURRENT ISSUE
 - Missing imports
 - Syntax errors
 - Type errors
+
+IMPORTANT FOR VARIABLE REDEFINITION ERRORS:
+- Read the ENTIRE file to find ALL instances of the conflicting variable name
+- Rename each instance to a unique, descriptive name
+- Ensure the renamed variables make sense in context
+- If the variable is used in multiple scopes, you may be able to reuse the name in different scopes, but NOT in the same scope
 
 Return ONLY the fixes in JSON format:
 {{
   "files": {{
     "path/to/file.js": {{
       "changes": {{
-        "old_code": "the problematic code",
-        "new_code": "the fixed code"
+        "old_code": "the problematic code section with duplicate variable",
+        "new_code": "the fixed code with unique variable names"
       }}
     }}
   }}
 }}
 
 CRITICAL:
-- Fix variable name conflicts (use unique names)
+- Fix variable name conflicts by renaming ALL instances appropriately
 - Ensure all code is syntactically correct
 - Only fix the specific errors shown
-- Return valid JSON with proper escaping"""
+- Return valid JSON with proper escaping
+- For variable conflicts: show the FULL context where the variable is defined multiple times"""
 
         response = client.chat.completions.create(
             model=model,
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a code fixer. Return only valid JSON with code fixes. Fix build errors by correcting variable names, syntax, and imports."
+                    "content": "You are a code fixer. Return only valid JSON with code fixes. When fixing variable name conflicts, you MUST find ALL instances of the conflicting variable in the file and rename them to unique names. Read the entire file context to understand the scope of each variable."
                 },
                 {
                     "role": "user",
                     "content": context
                 }
             ],
-            temperature=0.2,
-            max_tokens=2000
+            temperature=0.1,
+            max_tokens=4000
         )
         
         response_text = response.choices[0].message.content.strip()
+        logger.debug(f"Raw build fix response (first 500 chars): {response_text[:500]}")
+        
         # Remove markdown code blocks if present
         if response_text.startswith("```"):
             parts = response_text.split("```")
@@ -1520,16 +1614,40 @@ CRITICAL:
         if json_match:
             response_text = json_match.group(0)
         
-        fixes = json.loads(response_text)
+        # Try to parse JSON with better error handling
+        try:
+            fixes = json.loads(response_text)
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parse error at position {e.pos}: {e.msg}")
+            logger.error(f"Response text around error (chars {max(0, e.pos-100)}-{min(len(response_text), e.pos+100)}):")
+            logger.error(response_text[max(0, e.pos-100):min(len(response_text), e.pos+100)])
+            
+            # Try to fix common JSON issues
+            fixed_text = response_text
+            # Fix invalid escape sequences like \' with just ' (single quotes don't need escaping in JSON)
+            fixed_text = re.sub(r"(?<!\\)\\'", "'", fixed_text)
+            
+            try:
+                fixes = json.loads(fixed_text)
+                logger.info("Successfully parsed JSON after fixing escape sequences")
+            except json.JSONDecodeError:
+                logger.error("Failed to parse JSON even after fixing escape sequences")
+                return None
         
         # Merge with original fixes
         if 'files' in fixes:
             original_fixes['files'].update(fixes['files'])
         
+        # Add metadata for direct fixing fallback
+        original_fixes['_variable_name'] = variable_name
+        original_fixes['_problematic_file'] = problematic_file
+        
         return original_fixes
     except Exception as e:
-        logger.error(f"Build error fix generation failed: {e}")
-        return None
+        logger.error(f"Build error fix generation failed: {e}", exc_info=True)
+        # Return metadata even on error for direct fixing
+        result = {'files': {}, '_variable_name': variable_name, '_problematic_file': problematic_file}
+        return result
 
 async def generate_vulnerability_fixes(codebase_analysis: dict, model: str = "llama-3.3-70b-versatile") -> dict:
     """
@@ -2129,7 +2247,8 @@ async def handle_fix_command(chat_guid: str):
         
         # Generate fixes using LLM (with fallback to different model on rate limit)
         fixes = None
-        models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "mixtral-8x7b-32768", "llama-3.1-8b-instant"]
+        # Updated model list - removed decommissioned models (llama-3.1-70b-versatile, mixtral-8x7b-32768)
+        models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama-3.2-90b-text-preview"]
         
         model_name = None
         for model_name in models_to_try:
@@ -2147,6 +2266,14 @@ async def handle_fix_command(chat_guid: str):
                         continue
                     else:
                         send_text_message(chat_guid, f"❌ All models rate limited. Please wait and try again later.")
+                        raise
+                elif "decommissioned" in error_str or ("400" in error_str and "model" in error_str):
+                    # Model is decommissioned, skip immediately
+                    logger.warning(f"Model {model_name} is decommissioned, skipping...")
+                    if model_name != models_to_try[-1]:
+                        continue
+                    else:
+                        send_text_message(chat_guid, f"❌ All available models are unavailable.")
                         raise
                 else:
                     # Other error, try next model
@@ -2393,17 +2520,55 @@ async def handle_fix_command(chat_guid: str):
                                 if full_path.exists() and 'changes' in file_data:
                                     with open(full_path, 'r', encoding='utf-8') as f:
                                         current_content = f.read()
-                                    old_code = file_data['changes'].get('old_code', '')
-                                    new_code = file_data['changes'].get('new_code', '')
-                                    if old_code in current_content:
-                                        current_content = current_content.replace(old_code, new_code)
-                                        with open(full_path, 'w', encoding='utf-8') as f:
-                                            f.write(current_content)
-                                        logger.info(f"Applied build fix to {file_path}")
+                                    old_code = file_data['changes'].get('old_code', '').strip()
+                                    new_code = file_data['changes'].get('new_code', '').strip()
+                                    
+                                    if old_code and new_code:
+                                        # Try exact match first
+                                        if old_code in current_content:
+                                            current_content = current_content.replace(old_code, new_code, 1)  # Replace only first occurrence
+                                            with open(full_path, 'w', encoding='utf-8') as f:
+                                                f.write(current_content)
+                                            logger.info(f"Applied build fix to {file_path}")
+                                        else:
+                                            logger.warning(f"Exact match not found for old_code in {file_path}. Old code preview: {old_code[:100]}...")
+                            
+                            # If LLM fixes didn't work and we have a variable conflict, try direct fix
+                            variable_name = fixed_fixes.get('_variable_name')
+                            problematic_file = fixed_fixes.get('_problematic_file')
+                            
+                            if variable_name and problematic_file:
+                                problematic_full_path = repo_root / problematic_file
+                                if problematic_full_path.exists():
+                                    logger.info(f"Attempting direct variable fix for '{variable_name}' in {problematic_file}")
+                                    if fix_variable_conflict_direct(problematic_full_path, variable_name):
+                                        logger.info(f"✅ Direct variable fix succeeded for {problematic_file}")
+                                    else:
+                                        logger.warning(f"Direct variable fix failed for {problematic_file}")
+                            
                             # Update fixes dict for next iteration
                             fixes = fixed_fixes
                         else:
-                            logger.warning("Could not generate build fixes, will retry")
+                            # Even if LLM failed, try direct fix if we have variable info
+                            variable_name = None
+                            problematic_file = None
+                            var_match = re.search(r'the name `(\w+)` is defined multiple times', build_error)
+                            if var_match:
+                                variable_name = var_match.group(1)
+                                error_file_match = re.search(r'\./([\w/.-]+\.(js|ts|tsx|jsx))', build_error)
+                                if error_file_match:
+                                    problematic_file = error_file_match.group(1)
+                            
+                            if variable_name and problematic_file:
+                                problematic_full_path = repo_root / problematic_file
+                                if problematic_full_path.exists():
+                                    logger.info(f"LLM fix failed, attempting direct variable fix for '{variable_name}' in {problematic_file}")
+                                    if fix_variable_conflict_direct(problematic_full_path, variable_name):
+                                        logger.info(f"✅ Direct variable fix succeeded for {problematic_file}")
+                                    else:
+                                        logger.warning(f"Direct variable fix also failed for {problematic_file}")
+                            else:
+                                logger.warning("Could not generate build fixes, will retry")
                             
                 except subprocess.TimeoutExpired:
                     logger.warning("Build check timed out")
