@@ -74,7 +74,8 @@ ALERT_BATCH_MAX_COUNT = 5  # Send immediately if this many alerts are batched
 connected_websockets = []
 packet_history = deque(maxlen=100)
 alert_history = deque(maxlen=50)
-MONITORED_PORT = 8000  # Default port to monitor for demo traffic
+http_request_history = deque(maxlen=200)  # Store recent HTTP requests for display
+MONITORED_PORT = 3002  # Default port to monitor for demo traffic
 event_loop = None  # Store event loop reference for async operations from threads
 sniffer_stop_event = threading.Event()  # Event to signal sniffer to stop
 sniffer_thread = None  # Reference to the sniffer thread
@@ -124,35 +125,67 @@ async def log_requests(request: Request, call_next):
     """
     Middleware to log all HTTP requests and detect attacks at application layer
     """
-    global event_loop, request_tracker, HTTP_REQUEST_LAST_DDOS_ALERT, DDOS_REQUEST_THRESHOLD, MONITORED_PORT
+    global event_loop, request_tracker, HTTP_REQUEST_LAST_DDOS_ALERT, DDOS_REQUEST_THRESHOLD, MONITORED_PORT, http_request_history
     
     client_ip = request.client.host if request.client else "Unknown"
+    current_time = time.time()
+    timestamp = datetime.now().isoformat()
     
     # Skip logging requests to config endpoints (they're not the traffic we're monitoring)
-    if request.url.path in ["/api/config", "/api/set-target"]:
+    if request.url.path in ["/api/config", "/api/set-target", "/api/requests"]:
         response = await call_next(request)
         return response
     
-    # Log as packet - ALWAYS use the current MONITORED_PORT value
-    # Read it fresh from the global to ensure we have the latest configured port
-    # IMPORTANT: Read MONITORED_PORT directly from global scope
-    current_port = MONITORED_PORT  # Read current value from global
-    pkt_info = {
-        "src": client_ip,
-        "dst": f"localhost:{current_port}",
-        "proto": "HTTP",
-        "len": 0,
-        "timestamp": datetime.now().isoformat()
-    }
-    packet_history.appendleft(pkt_info)
+    # Note: We don't capture body here to avoid consuming it
+    # Body content will be checked in specific endpoints (like /api/login)
+    body_content = None
     
-    # Debug: Log the port being used (first few packets to verify it's working)
-    if len(packet_history) <= 5:
-        logger.info(f"📦 Middleware packet #{len(packet_history)} - Destination: localhost:{current_port} (MONITORED_PORT={MONITORED_PORT}, path={request.url.path})")
+    # Detect threats
+    threat_type = None
+    threat_details = None
+    
+    # Check for SQL injection in URL, query params, and body
+    full_url = str(request.url)
+    query_string = request.url.query
+    body_str = str(body_content) if body_content else ""
+    
+    # Check query params
+    if query_string and detect_sql_injection(query_string):
+        threat_type = "SQL Injection"
+        clean_snippet = ''.join(c if c.isprintable() else '' for c in query_string[:100])
+        threat_details = f"Query: {clean_snippet}"
+    
+    # Check body content
+    if not threat_type and body_content:
+        if isinstance(body_content, dict):
+            # Check all values in the body
+            for key, value in body_content.items():
+                if isinstance(value, str) and detect_sql_injection(value):
+                    threat_type = "SQL Injection"
+                    clean_snippet = ''.join(c if c.isprintable() else '' for c in str(value)[:100])
+                    threat_details = f"Body[{key}]: {clean_snippet}"
+                    break
+        elif isinstance(body_content, str) and detect_sql_injection(body_content):
+            threat_type = "SQL Injection"
+            clean_snippet = ''.join(c if c.isprintable() else '' for c in body_content[:100])
+            threat_details = f"Body: {clean_snippet}"
+    
+    # Store the HTTP request
+    request_record = {
+        "method": request.method,
+        "path": request.url.path,
+        "query": query_string,
+        "body": body_content,
+        "headers": dict(request.headers),
+        "client_ip": client_ip,
+        "timestamp": timestamp,
+        "threat_type": threat_type,
+        "threat_details": threat_details,
+        "url": full_url
+    }
+    http_request_history.appendleft(request_record)
     
     # DDoS Detection at Application Layer - Track HTTP request volume per IP
-    current_time = time.time()
-    
     # Add current request timestamp to tracker for this IP
     if client_ip not in request_tracker:
         request_tracker[client_ip] = deque(maxlen=200)
@@ -170,9 +203,13 @@ async def log_requests(request: Request, call_next):
     if request_count > 20:
         logger.debug(f"📊 IP {client_ip}: {request_count} requests/sec (threshold: {DDOS_REQUEST_THRESHOLD}/sec)")
     
+    # Check for DDoS
     if request_count > DDOS_REQUEST_THRESHOLD:
         # Check cooldown to avoid spamming alerts
         if current_time - HTTP_REQUEST_LAST_DDOS_ALERT > ALERT_COOLDOWN:
+            if not threat_type:  # Only set if not already SQL injection
+                threat_type = "DDoS"
+                threat_details = f"{request_count} requests/sec"
             msg = f"⚠️ ALERT: DDoS Attack Detected from {client_ip}! {request_count} requests/sec (threshold: {DDOS_REQUEST_THRESHOLD}/sec)"
             logger.warning(f"🔴 {msg}")
             logger.warning(f"📊 Request details: {request.method} {request.url.path} | Query params: {str(request.url.query)[:100]}")
@@ -181,8 +218,6 @@ async def log_requests(request: Request, call_next):
             HTTP_REQUEST_LAST_DDOS_ALERT = current_time
     
     # Also track total request volume across all IPs for aggregate DDoS detection
-    # Clean old requests from all IP trackers periodically (every 10 requests from any IP)
-    # Count total requests in the last second from all IPs (after cleaning old requests)
     total_requests_last_second = sum(len(ip_tracker) for ip_tracker in request_tracker.values())
     
     # Debug logging for high total request rates
@@ -192,22 +227,26 @@ async def log_requests(request: Request, call_next):
     # If total requests exceed threshold, also trigger alert
     if total_requests_last_second > DDOS_REQUEST_THRESHOLD * 2:  # 160 req/sec total
         if current_time - HTTP_REQUEST_LAST_DDOS_ALERT > ALERT_COOLDOWN:
+            if not threat_type:  # Only set if not already set
+                threat_type = "DDoS"
+                threat_details = f"Total: {total_requests_last_second} req/sec"
             msg = f"⚠️ ALERT: Large-scale DDoS Attack Detected! Total: {total_requests_last_second} requests/sec from multiple sources!"
             logger.warning(f"🔴 {msg}")
             add_alert("DDoS", "Multiple IPs", msg)
             send_alert_batched("DDoS", "Multiple IPs", f"{total_requests_last_second} req/sec")
             HTTP_REQUEST_LAST_DDOS_ALERT = current_time
     
-    # Check for SQL injection in URL and query params
-    full_url = str(request.url)
-    query_string = request.url.query
+    # Update threat_type in request record if DDoS was detected
+    if threat_type:
+        request_record["threat_type"] = threat_type
+        request_record["threat_details"] = threat_details
     
-    if query_string and detect_sql_injection(query_string):
-        clean_snippet = ''.join(c if c.isprintable() else '' for c in query_string[:100])
-        msg = f"⚠️ ALERT: SQL Injection from {client_ip}! Query: {clean_snippet}"
+    # If SQL injection was detected, create alert
+    if threat_type == "SQL Injection":
+        msg = f"⚠️ ALERT: SQL Injection from {client_ip}! {threat_details}"
         logger.warning(msg)
         add_alert("SQL Injection", client_ip, msg)
-        send_alert_batched("SQL Injection", client_ip, clean_snippet)
+        send_alert_batched("SQL Injection", client_ip, threat_details or query_string[:50])
     
     # Broadcast update
     if event_loop and connected_websockets:
@@ -278,7 +317,7 @@ def process_packet(packet):
 
     current_time = time.time()
     
-    # Log packet for frontend display
+    # Only process packets that involve the monitored port
     if packet.haslayer(IP):
         src_ip = packet[IP].src
         dst_ip = packet[IP].dst
@@ -293,79 +332,87 @@ def process_packet(packet):
             src_port = packet[UDP].sport
             dst_port = packet[UDP].dport
         
-        # Format destination with port if available
-        if dst_port:
-            dst_display = f"{dst_ip}:{dst_port}"
-        else:
-            dst_display = dst_ip
-        
-        # Format source with port if available
-        if src_port:
-            src_display = f"{src_ip}:{src_port}"
-        else:
-            src_display = src_ip
-        
-        pkt_info = {
-            "src": src_display,
-            "dst": dst_display,
-            "proto": packet[IP].proto,
-            "len": len(packet),
-            "timestamp": datetime.now().isoformat()
-        }
-        packet_history.appendleft(pkt_info)
-        
-        # Broadcast packet update to frontend
-        if event_loop and connected_websockets:
-            try:
-                asyncio.run_coroutine_threadsafe(broadcast_update(), event_loop)
-            except:
-                pass
-    
-    # 1. DDoS Detection (Volumetric)
-    # Add current timestamp to window
-    PACKET_WINDOW.append(current_time)
-    
-    # Remove packets older than 1 second
-    while PACKET_WINDOW and PACKET_WINDOW[0] < current_time - 1:
-        PACKET_WINDOW.popleft()
-    
-    # Check if threshold exceeded
-    if len(PACKET_WINDOW) > DDOS_THRESHOLD:
-        if current_time - LAST_ALERT_TIME > ALERT_COOLDOWN:
-            src_ip = packet[IP].src if packet.haslayer(IP) else "Unknown"
-            msg = f"⚠️ ALERT: Potential DDoS Attack Detected! Traffic spike: {len(PACKET_WINDOW)} packets/sec."
-            logger.warning(msg)
-            add_alert("DDoS", src_ip, msg)
-            send_alert_batched("DDoS", src_ip, f"{len(PACKET_WINDOW)} packets/sec")
-            LAST_ALERT_TIME = current_time
-
-    # 2. SQL Injection Detection
-    if packet.haslayer(Raw):
-        try:
-            raw_payload = packet[Raw].load
+        # Only log if this packet involves the monitored port
+        # (either source or destination port matches)
+        if src_port == MONITORED_PORT or dst_port == MONITORED_PORT:
+            # Format destination with port if available
+            if dst_port:
+                # Show localhost for 127.0.0.1 addresses
+                if dst_ip in ["127.0.0.1", "::1"] or dst_ip.startswith("127."):
+                    dst_display = f"localhost:{dst_port}"
+                else:
+                    dst_display = f"{dst_ip}:{dst_port}"
+            else:
+                dst_display = dst_ip if dst_ip not in ["127.0.0.1", "::1"] else "localhost"
             
-            # Skip encrypted traffic (TLS/SSL)
-            if is_likely_encrypted(raw_payload):
-                return
+            # Format source with port if available
+            if src_port:
+                src_display = f"{src_ip}:{src_port}"
+            else:
+                src_display = src_ip
             
-            # Try to decode as text
-            try:
-                load = raw_payload.decode('utf-8')
-            except:
-                return  # Skip if can't decode as UTF-8
+            pkt_info = {
+                "src": src_display,
+                "dst": dst_display,
+                "proto": packet[IP].proto,
+                "len": len(packet),
+                "timestamp": datetime.now().isoformat()
+            }
+            packet_history.appendleft(pkt_info)
             
-            if detect_sql_injection(load):
+            # Broadcast packet update to frontend
+            if event_loop and connected_websockets:
+                try:
+                    asyncio.run_coroutine_threadsafe(broadcast_update(), event_loop)
+                except:
+                    pass
+            
+            # Only do attack detection on packets involving the monitored port
+            # 1. DDoS Detection (Volumetric)
+            # Add current timestamp to window
+            PACKET_WINDOW.append(current_time)
+            
+            # Remove packets older than 1 second
+            while PACKET_WINDOW and PACKET_WINDOW[0] < current_time - 1:
+                PACKET_WINDOW.popleft()
+            
+            # Check if threshold exceeded
+            if len(PACKET_WINDOW) > DDOS_THRESHOLD:
                 if current_time - LAST_ALERT_TIME > ALERT_COOLDOWN:
                     src_ip = packet[IP].src if packet.haslayer(IP) else "Unknown"
-                    # Extract cleaner payload snippet
-                    clean_snippet = ''.join(c if c.isprintable() else '' for c in load[:100])
-                    msg = f"⚠️ ALERT: SQL Injection from {src_ip}! Payload: {clean_snippet}..."
+                    msg = f"⚠️ ALERT: Potential DDoS Attack Detected! Traffic spike: {len(PACKET_WINDOW)} packets/sec."
                     logger.warning(msg)
-                    add_alert("SQL Injection", src_ip, msg)
-                    send_alert_batched("SQL Injection", src_ip, clean_snippet)
+                    add_alert("DDoS", src_ip, msg)
+                    send_alert_batched("DDoS", src_ip, f"{len(PACKET_WINDOW)} packets/sec")
                     LAST_ALERT_TIME = current_time
-        except Exception as e:
-            pass # Ignore decoding errors
+
+            # 2. SQL Injection Detection
+            if packet.haslayer(Raw):
+                try:
+                    raw_payload = packet[Raw].load
+                    
+                    # Skip encrypted traffic (TLS/SSL)
+                    if is_likely_encrypted(raw_payload):
+                        return
+                    
+                    # Try to decode as text
+                    try:
+                        load = raw_payload.decode('utf-8')
+                    except:
+                        return  # Skip if can't decode as UTF-8
+                    
+                    if detect_sql_injection(load):
+                        if current_time - LAST_ALERT_TIME > ALERT_COOLDOWN:
+                            src_ip = packet[IP].src if packet.haslayer(IP) else "Unknown"
+                            # Extract cleaner payload snippet
+                            clean_snippet = ''.join(c if c.isprintable() else '' for c in load[:100])
+                            msg = f"⚠️ ALERT: SQL Injection from {src_ip}! Payload: {clean_snippet}..."
+                            logger.warning(msg)
+                            add_alert("SQL Injection", src_ip, msg)
+                            send_alert_batched("SQL Injection", src_ip, clean_snippet)
+                            LAST_ALERT_TIME = current_time
+                except Exception as e:
+                    pass # Ignore decoding errors
 
 def add_alert(alert_type: str, source: str, message: str):
     """Add an alert to history and broadcast to connected WebSocket clients"""
@@ -689,15 +736,22 @@ def start_sniffer():
     # Clear stop event before starting
     sniffer_stop_event.clear()
     logger.info(f"Starting packet sniffer on port {MONITORED_PORT}...")
-    # Only capture traffic to/from the monitored port (default 8000)
-    # This filters out all other network traffic from your computer
-    sniff_filter = f"tcp port {MONITORED_PORT}"
+    # Capture traffic both TO and FROM the monitored port
+    # This filters to only show traffic involving the configured port
+    sniff_filter = f"tcp port {MONITORED_PORT} or udp port {MONITORED_PORT}"
     logger.info(f"Sniffing with filter: {sniff_filter}")
+    logger.info(f"⚠️ NOTE: Packet sniffing requires root/admin privileges. If no packets are detected, try running with sudo.")
+    logger.info(f"💡 To test: Make HTTP requests to http://localhost:{MONITORED_PORT} and check /api/debug/sniffer endpoint")
+    
     try:
         # Use stop_filter to allow stopping the sniffer
+        # Capture indefinitely - this will block until stop_event is set
         sniff(filter=sniff_filter, prn=process_packet, store=0, stop_filter=lambda x: sniffer_stop_event.is_set())
+    except PermissionError as e:
+        logger.error(f"❌ Permission denied: Packet sniffing requires root/admin privileges. Error: {e}")
+        logger.error(f"💡 Try running the server with: sudo python main.py (or sudo uvicorn main:app)")
     except Exception as e:
-        logger.error(f"Sniffer failed: {e}")
+        logger.error(f"Sniffer failed: {e}", exc_info=True)
 
 # --- BlueBubbles Integration ---
 
@@ -1057,8 +1111,10 @@ async def vulnerable_login_page():
 @app.post("/api/login")
 async def login_endpoint(request: Request):
     """Fake login endpoint that logs traffic"""
+    global http_request_history
     try:
         # Try to get JSON body
+        body = None
         try:
             body = await request.json()
             username = body.get('username', '')
@@ -1067,15 +1123,59 @@ async def login_endpoint(request: Request):
             # Fallback to empty if no JSON body
             username = ''
             password = ''
+            body = {}
         
-        # The middleware already checked query params, so we just need to check body
+        client_ip = request.client.host if request.client else "Unknown"
+        timestamp = datetime.now().isoformat()
+        
+        # Update the most recent request record (added by middleware) with body content
+        if http_request_history and len(http_request_history) > 0:
+            # Find the most recent request from this IP to this endpoint
+            for req_record in http_request_history:
+                if (req_record.get('path') == '/api/login' and 
+                    req_record.get('client_ip') == client_ip and
+                    req_record.get('method') == 'POST'):
+                    req_record['body'] = body
+                    break
+        
+        # Check body for SQL injection
+        threat_found = False
+        threat_details = None
         if username and (detect_sql_injection(username) or detect_sql_injection(password)):
-            client_ip = request.client.host if request.client else "Unknown"
             clean_snippet = ''.join(c if c.isprintable() else '' for c in username[:50])
-            msg = f"⚠️ ALERT: SQL Injection from {client_ip}! Username: {clean_snippet}"
+            threat_details = f"Username: {clean_snippet}"
+            msg = f"⚠️ ALERT: SQL Injection from {client_ip}! {threat_details}"
             logger.warning(msg)
             add_alert("SQL Injection", client_ip, msg)
             send_alert_batched("SQL Injection", client_ip, clean_snippet)
+            threat_found = True
+            
+            # Update request record with threat info
+            if http_request_history and len(http_request_history) > 0:
+                for req_record in http_request_history:
+                    if (req_record.get('path') == '/api/login' and 
+                        req_record.get('client_ip') == client_ip and
+                        req_record.get('method') == 'POST'):
+                        req_record['threat_type'] = "SQL Injection"
+                        req_record['threat_details'] = threat_details
+                        req_record['body'] = body
+                        break
+        
+        # If no matching record found, create a new one
+        if threat_found:
+            request_record = {
+                "method": "POST",
+                "path": "/api/login",
+                "query": request.url.query,
+                "body": body,
+                "headers": dict(request.headers),
+                "client_ip": client_ip,
+                "timestamp": timestamp,
+                "threat_type": "SQL Injection",
+                "threat_details": threat_details,
+                "url": str(request.url)
+            }
+            http_request_history.appendleft(request_record)
         
         return {"status": "error", "message": "Invalid credentials"}
     except Exception as e:
@@ -1087,6 +1187,15 @@ async def health_check(request: Request):
     """Simple health check endpoint for DDoS simulation"""
     # Just return OK - the sniffer will pick up the traffic volume
     return {"status": "ok"}
+
+@app.get("/api/requests")
+async def get_recent_requests():
+    """Get recent HTTP requests for display in frontend"""
+    global http_request_history
+    # Return the most recent requests (reverse order so newest first)
+    requests_list = list(http_request_history)
+    # Limit to last 100 for performance
+    return {"status": "ok", "requests": requests_list[:100]}
 
 @app.post("/api/analyze")
 async def analyze_packets():
@@ -1286,11 +1395,16 @@ async def polling_loop():
 
 @app.on_event("startup")
 async def startup_event():
-    global event_loop, sniffer_thread
+    global event_loop, sniffer_thread, MONITORED_PORT
     event_loop = asyncio.get_event_loop()
     # Start the sniffer in a daemon thread so it doesn't block
+    logger.info(f"🚀 Starting ShieldOS backend...")
+    logger.info(f"📡 Initializing packet sniffer for port {MONITORED_PORT}...")
     sniffer_thread = threading.Thread(target=start_sniffer, daemon=True)
     sniffer_thread.start()
+    # Give sniffer a moment to start
+    await asyncio.sleep(0.5)
+    logger.info(f"✅ Sniffer thread started (monitoring port {MONITORED_PORT})")
     
     # Start polling for BlueBubbles messages
     if BLUEBUBBLES_URL and BLUEBUBBLES_PASSWORD:
@@ -1300,6 +1414,7 @@ async def startup_event():
         logger.warning("⚠️ BlueBubbles not configured - message polling disabled")
     
     logger.info("ShieldOS backend started. Visit http://localhost:8000/vulnerable-login for attack simulation.")
+    logger.info(f"💡 To test: Make requests to localhost:{MONITORED_PORT} and they should appear in the dashboard")
 
 def send_image_message(chat_guid: str, image_path: str, message: str = '📊 Attack Flow Diagram', content_type: str = 'image/png', method: str = 'apple-script'):
     """
@@ -2978,6 +3093,19 @@ async def handle_new_message(data: dict):
         except Exception as e:
             logger.error(f"❌ Analysis generation failed: {e}", exc_info=True)
             send_text_message(chat_guid, f"❌ Analysis failed: {str(e)[:100]}")
+
+@app.get("/api/debug/sniffer")
+async def debug_sniffer():
+    """Debug endpoint to check sniffer status"""
+    global sniffer_thread, MONITORED_PORT, packet_history, PACKET_WINDOW
+    return {
+        "sniffer_running": sniffer_thread is not None and sniffer_thread.is_alive(),
+        "monitored_port": MONITORED_PORT,
+        "packets_captured": len(packet_history),
+        "recent_packets": list(packet_history)[:5],
+        "packet_window_size": len(PACKET_WINDOW),
+        "note": "If sniffer_running is False or packets_captured is 0, you may need to run with sudo/admin privileges"
+    }
 
 @app.get("/status")
 def get_status():

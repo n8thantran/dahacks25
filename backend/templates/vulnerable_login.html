@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meridian Trust Bank - Login</title>
+    <style>
+        /* Import fonts to match the serif/sans-serif style */
+        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600&family=Lato:wght@300;400;700&display=swap');
+
+        /* CSS Reset & Base Styles */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: #f4f1e8; /* Cream background */
+            font-family: 'Lato', sans-serif;
+            color: #333;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Header Section */
+        header {
+            background-color: #1a2b49; /* Dark Navy */
+            padding: 25px 40px;
+            width: 100%;
+            border-bottom: 4px solid #bf9b30; /* Subtle gold border at very bottom of header */
+        }
+
+        .logo {
+            font-family: 'Playfair Display', serif;
+            color: #d4af37; /* Gold color */
+            font-size: 36px;
+            letter-spacing: 1px;
+            margin-bottom: 5px;
+        }
+
+        .tagline {
+            color: #aebdd4; /* Muted blue-grey */
+            font-size: 12px;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            font-weight: 400;
+        }
+
+        /* Main Layout */
+        main {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start; /* Aligns to top rather than center vertical */
+            padding-top: 80px; /* Push card down */
+        }
+
+        /* The Card */
+        .card {
+            background-color: #ffffff;
+            width: 100%;
+            max-width: 480px;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.15); /* Soft, diffuse shadow */
+            text-align: center;
+            /* No border radius visible in image, or very sharp */
+        }
+
+        /* Top section of the card */
+        .card-content {
+            padding: 50px 40px;
+        }
+
+        h1 {
+            font-family: 'Playfair Display', serif;
+            color: #1a2b49; /* Dark Navy */
+            font-size: 42px;
+            font-weight: 400;
+            margin-bottom: 15px;
+        }
+
+        .subtitle {
+            color: #666;
+            font-size: 18px;
+            margin-bottom: 40px;
+            font-weight: 300;
+        }
+
+        /* The Gold Button */
+        .btn-primary {
+            display: block;
+            width: 100%;
+            background-color: #cba032; /* Mustard Gold */
+            color: #1a2b49;
+            font-family: 'Lato', sans-serif;
+            font-weight: 700;
+            font-size: 16px;
+            padding: 18px 0;
+            border: none;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .btn-primary:hover {
+            background-color: #b68f2b;
+        }
+
+        /* Bottom section of the card */
+        .card-footer {
+            background-color: #f5f7f6; /* Very light greenish/grey */
+            padding: 40px 40px;
+            border-top: 1px solid #eee;
+        }
+
+        .footer-title {
+            font-family: 'Playfair Display', serif;
+            color: #4a7c75; /* Teal/Green color */
+            font-size: 24px;
+            margin-bottom: 15px;
+        }
+
+        .footer-text {
+            color: #6f7a85;
+            font-size: 16px;
+            line-height: 1.5;
+            margin-bottom: 25px;
+        }
+
+        .enroll-link {
+            color: #3e7d76;
+            text-decoration: none;
+            font-weight: 700;
+            font-size: 16px;
+            display: inline-flex;
+            align-items: center;
+        }
+
+        .enroll-link:hover {
+            text-decoration: underline;
+        }
+
+        .arrow {
+            margin-left: 8px;
+            font-size: 18px;
+        }
+
+        /* Form Styles */
+        .form-group {
+            margin-bottom: 25px;
+            text-align: left;
+        }
+
+        label {
+            display: block;
+            color: #1a2b49;
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            letter-spacing: 0.5px;
+        }
+
+        input[type="text"],
+        input[type="password"] {
+            width: 100%;
+            padding: 14px 16px;
+            border: 2px solid #e0e0e0;
+            font-family: 'Lato', sans-serif;
+            font-size: 16px;
+            color: #333;
+            background-color: #fff;
+            transition: border-color 0.3s;
+        }
+
+        input[type="text"]:focus,
+        input[type="password"]:focus {
+            outline: none;
+            border-color: #cba032;
+        }
+
+        .status-message {
+            margin-top: 20px;
+            padding: 12px 16px;
+            border-radius: 4px;
+            font-size: 14px;
+            display: none;
+            text-align: center;
+        }
+
+        .status-message.success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+            display: block;
+        }
+
+        .status-message.error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+            display: block;
+        }
+
+        .status-message.info {
+            background-color: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+            display: block;
+        }
+
+        .test-section {
+            margin-top: 30px;
+            padding-top: 25px;
+            border-top: 1px solid #ddd;
+        }
+
+        .test-section-title {
+            color: #6f7a85;
+            font-size: 12px;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-weight: 600;
+        }
+
+        .test-btn {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+            background: transparent;
+            border: 2px solid #ee5a6f;
+            color: #ee5a6f;
+            font-family: 'Lato', sans-serif;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .test-btn:hover {
+            background: #ee5a6f;
+            color: white;
+        }
+
+        .test-btn:last-child {
+            margin-bottom: 0;
+        }
+
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="logo">Meridian Trust Bank</div>
+        <div class="tagline">Secure Banking Since 1847</div>
+    </header>
+
+    <main>
+        <div class="card">
+            
+            <div class="card-content">
+                <h1>Welcome Back</h1>
+                <p class="subtitle">Sign in to access your accounts</p>
+                
+                <form id="loginForm">
+                    <div class="form-group">
+                        <label for="username">Username</label>
+                        <input type="text" id="username" name="username" placeholder="Enter your username" required autocomplete="username">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="password">Password</label>
+                        <input type="password" id="password" name="password" placeholder="Enter your password" required autocomplete="current-password">
+                    </div>
+
+                    <button type="submit" class="btn-primary">
+                        Sign In to Online Banking
+                    </button>
+                </form>
+
+                <div id="statusMessage" class="status-message"></div>
+            </div>
+
+            <div class="card-footer">
+                <div class="footer-title">New to Meridian Trust?</div>
+                <p class="footer-text">Experience secure, modern banking with our online platform.</p>
+                <a href="#" class="enroll-link">
+                    Enroll Now <span class="arrow">&rarr;</span>
+                </a>
+                
+                <div class="test-section">
+                    <p class="test-section-title">🧪 Security Testing</p>
+                    <button onclick="simulateSQLi()" class="test-btn">
+                        💉 Test SQL Injection
+                    </button>
+                    <button onclick="simulateDDoS()" class="test-btn">
+                        💥 Test DDoS Attack
+                    </button>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <script>
+        const BACKEND_URL = window.location.origin;
+
+        // Normal login form submission
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const statusMessage = document.getElementById('statusMessage');
+            
+            // Show loading state
+            statusMessage.className = 'status-message info';
+            statusMessage.textContent = 'Authenticating...';
+            
+            try {
+                const response = await fetch(`${BACKEND_URL}/api/login`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ username, password })
+                });
+                
+                const data = await response.json();
+                
+                // Always show error message (this is a vulnerable demo endpoint)
+                statusMessage.className = 'status-message error';
+                statusMessage.textContent = '❌ Invalid credentials';
+                
+                // Reset form after 3 seconds
+                setTimeout(() => {
+                    document.getElementById('loginForm').reset();
+                    statusMessage.className = 'status-message';
+                    statusMessage.textContent = '';
+                }, 3000);
+            } catch (error) {
+                statusMessage.className = 'status-message error';
+                statusMessage.textContent = '⚠️ Connection error. Please try again.';
+                
+                setTimeout(() => {
+                    statusMessage.className = 'status-message';
+                    statusMessage.textContent = '';
+                }, 3000);
+            }
+        });
+
+        // SQL Injection attack simulation
+        async function simulateSQLi() {
+            const statusMessage = document.getElementById('statusMessage');
+            statusMessage.className = 'status-message error';
+            statusMessage.textContent = '🔴 Launching SQL Injection attack...';
+            
+            const payloads = [
+                { username: "' OR '1'='1", password: "anything" },
+                { username: "admin' --", password: "test" },
+                { username: "' OR 1=1--", password: "test" },
+                { username: "admin' UNION SELECT * FROM users--", password: "test" },
+                { username: "1' OR '1' = '1", password: "test" },
+            ];
+            
+            for (let payload of payloads) {
+                try {
+                    // Send as POST with query string to trigger detection
+                    await fetch(`${BACKEND_URL}/api/login?username=${encodeURIComponent(payload.username)}&password=${encodeURIComponent(payload.password)}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    await new Promise(resolve => setTimeout(resolve, 300));
+                } catch (error) {
+                    // Expected - just generating traffic
+                }
+            }
+            
+            statusMessage.className = 'status-message success';
+            statusMessage.textContent = '✅ SQL Injection attack simulated! Check ShieldOS dashboard.';
+            setTimeout(() => {
+                statusMessage.className = 'status-message';
+                statusMessage.textContent = '';
+            }, 5000);
+        }
+
+        // DDoS attack simulation
+        async function simulateDDoS() {
+            const statusMessage = document.getElementById('statusMessage');
+            statusMessage.className = 'status-message error';
+            statusMessage.textContent = '🔴 Launching DDoS attack... Firing 500+ requests!';
+            
+            const startTime = performance.now();
+            let requestCounter = 0;
+            const baseUrl = `${BACKEND_URL}/api/health`;
+            
+            try {
+                // Trigger backend simulation endpoint
+                fetch(`${BACKEND_URL}/api/simulate-traffic?attack_type=ddos`).catch(() => {});
+                
+                // Fire burst of requests
+                for (let i = 0; i < 500; i++) {
+                    const ts = performance.now();
+                    const unique = `${ts}-${i}-${Math.random().toString(36).substr(2, 5)}`;
+                    fetch(`${baseUrl}?ddos=${i}&ts=${ts}&u=${unique}`, {
+                        method: 'GET',
+                        cache: 'no-store',
+                        mode: 'cors',
+                        headers: {
+                            'Cache-Control': 'no-cache, no-store, must-revalidate',
+                            'Pragma': 'no-cache',
+                            'X-Request-ID': unique
+                        }
+                    }).catch(() => {});
+                    requestCounter++;
+                }
+                
+                const endTime = performance.now();
+                statusMessage.className = 'status-message success';
+                statusMessage.textContent = `✅ DDoS attack simulated! ${requestCounter} requests fired in ${(endTime - startTime).toFixed(0)}ms. Check ShieldOS dashboard.`;
+                setTimeout(() => {
+                    statusMessage.className = 'status-message';
+                    statusMessage.textContent = '';
+                }, 5000);
+            } catch (error) {
+                statusMessage.className = 'status-message error';
+                statusMessage.textContent = '⚠️ Error during DDoS simulation';
+                setTimeout(() => {
+                    statusMessage.className = 'status-message';
+                    statusMessage.textContent = '';
+                }, 3000);
+            }
+        }
+    </script>
+
+</body>
+</html>

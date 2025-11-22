@@ -41,9 +41,23 @@ interface AnalysisSummary {
   text_summary: string;
 }
 
+interface HttpRequest {
+  method: string;
+  path: string;
+  query: string;
+  body?: any;
+  headers: Record<string, string>;
+  client_ip: string;
+  timestamp: string;
+  threat_type?: string;
+  threat_details?: string;
+  url: string;
+}
+
 export default function Home() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [packets, setPackets] = useState<Packet[]>([]);
+  const [httpRequests, setHttpRequests] = useState<HttpRequest[]>([]);
   const [connected, setConnected] = useState(false);
   const [phoneNumber, setPhoneNumber] = useState('408-916-7303');
   const [monitoredPort, setMonitoredPort] = useState('8000');
@@ -109,6 +123,31 @@ export default function Home() {
       element.innerHTML = '<p className="text-red-400 text-xs">Error rendering diagram</p>';
     });
   }, [analysis?.mermaid_diagram, isClient]);
+
+  // Fetch HTTP requests from backend
+  useEffect(() => {
+    const fetchRequests = async () => {
+      try {
+        const res = await fetch('http://localhost:8000/api/requests');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.requests) {
+            setHttpRequests(data.requests);
+          }
+        }
+      } catch (e) {
+        console.error('Failed to fetch requests:', e);
+      }
+    };
+
+    // Fetch immediately
+    fetchRequests();
+
+    // Then poll every second
+    const interval = setInterval(fetchRequests, 1000);
+
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     const connect = () => {
@@ -573,45 +612,110 @@ export default function Home() {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left Column: Live Traffic */}
+        {/* Left Column: HTTP Requests */}
         <div className="lg:col-span-2 space-y-6">
           <div className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg overflow-hidden">
             <div className="p-5 border-b border-[#2a2a2a] flex justify-between items-center">
               <h2 className="font-bold flex items-center gap-3 text-lg text-white">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
-                Live Packet Stream
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                Incoming HTTP Requests (Port 8000)
               </h2>
               <div className="flex items-center gap-2">
-                <span className="w-2 h-2 bg-green-500 rounded-full"></span>
+                <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
                 <span className="text-xs text-green-400 font-medium">Live</span>
+                <span className="text-xs text-gray-400 font-mono ml-2">({httpRequests.length})</span>
               </div>
             </div>
             <div className="p-6 h-[500px] overflow-y-auto font-mono text-xs">
-              <table className="w-full text-left">
-                <thead className="sticky top-0 bg-[#1a1a1a]">
-                  <tr className="text-gray-400 border-b border-[#2a2a2a]">
-                    <th className="pb-3 font-medium">Timestamp</th>
-                    <th className="pb-3 font-medium">Source</th>
-                    <th className="pb-3 font-medium">Destination</th>
-                    <th className="pb-3 font-medium">Proto</th>
-                    <th className="pb-3 font-medium">Len</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {packets.map((pkt, i) => (
-                    <tr 
-                      key={i} 
-                      className="hover:bg-[#222] transition-colors border-b border-[#2a2a2a]"
-                    >
-                      <td className="py-3 text-gray-400">{new Date(pkt.timestamp).toLocaleTimeString()}</td>
-                      <td className="py-3 text-cyan-400">{pkt.src}</td>
-                      <td className="py-3 text-purple-400">{pkt.dst}</td>
-                      <td className="py-3 text-gray-300">{pkt.proto}</td>
-                      <td className="py-3 text-gray-300">{pkt.len}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              {httpRequests.length === 0 ? (
+                <div className="text-center text-gray-500 mt-20">
+                  <p className="font-medium mb-2">No requests yet</p>
+                  <p className="text-xs">Waiting for incoming traffic on port 8000...</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {httpRequests.map((req, i) => {
+                    const isThreat = req.threat_type !== null && req.threat_type !== undefined;
+                    const isSqlInjection = req.threat_type === 'SQL Injection';
+                    
+                    return (
+                      <div
+                        key={i}
+                        className={`border rounded-lg p-4 transition-colors ${
+                          isSqlInjection
+                            ? 'bg-red-950/30 border-red-600/50 hover:bg-red-950/40'
+                            : isThreat
+                            ? 'bg-yellow-950/20 border-yellow-600/50 hover:bg-yellow-950/30'
+                            : 'bg-[#0f0f0f] border-[#2a2a2a] hover:bg-[#151515]'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between mb-2">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className={`font-bold px-2 py-0.5 rounded text-xs ${
+                              req.method === 'GET' ? 'bg-blue-900/50 text-blue-300' :
+                              req.method === 'POST' ? 'bg-purple-900/50 text-purple-300' :
+                              'bg-gray-800 text-gray-300'
+                            }`}>
+                              {req.method}
+                            </span>
+                            <span className="text-white font-medium">{req.path}</span>
+                            {req.query && (
+                              <span className="text-gray-400 text-xs">?{req.query.substring(0, 50)}{req.query.length > 50 ? '...' : ''}</span>
+                            )}
+                            {isThreat && (
+                              <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                                isSqlInjection
+                                  ? 'bg-red-600 text-white animate-pulse'
+                                  : 'bg-yellow-600 text-black'
+                              }`}>
+                                ⚠️ {req.threat_type}
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-gray-500 text-xs">
+                            {new Date(req.timestamp).toLocaleTimeString()}
+                          </span>
+                        </div>
+                        
+                        <div className="grid grid-cols-2 gap-2 text-xs mt-2">
+                          <div>
+                            <span className="text-gray-500">IP:</span>
+                            <span className="text-cyan-400 ml-1 font-mono">{req.client_ip}</span>
+                          </div>
+                          {isThreat && req.threat_details && (
+                            <div className="col-span-2">
+                              <span className="text-gray-500">Threat:</span>
+                              <span className={`ml-1 ${
+                                isSqlInjection ? 'text-red-400 font-bold' : 'text-yellow-400'
+                              }`}>
+                                {req.threat_details}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                        
+                        {req.body && typeof req.body === 'object' && (
+                          <div className="mt-2 pt-2 border-t border-[#2a2a2a]">
+                            <div className="text-gray-500 text-xs mb-1">Body:</div>
+                            <pre className="text-xs text-gray-300 bg-[#0a0a0a] p-2 rounded overflow-x-auto">
+                              {JSON.stringify(req.body, null, 2)}
+                            </pre>
+                          </div>
+                        )}
+                        
+                        {req.body && typeof req.body === 'string' && req.body.length > 0 && (
+                          <div className="mt-2 pt-2 border-t border-[#2a2a2a]">
+                            <div className="text-gray-500 text-xs mb-1">Body:</div>
+                            <div className="text-xs text-gray-300 bg-[#0a0a0a] p-2 rounded">
+                              {req.body.substring(0, 200)}{req.body.length > 200 ? '...' : ''}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         </div>
