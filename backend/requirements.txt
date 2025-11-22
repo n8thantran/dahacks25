@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+scapy
+requests
+python-dotenv
+websockets
+groq
+PyJWT
+cryptography

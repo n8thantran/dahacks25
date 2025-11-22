@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fake Banking Login - Attack Simulator</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            padding: 40px;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            max-width: 400px;
+            width: 100%;
+        }
+
+        .logo {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .logo h1 {
+            color: #667eea;
+            font-size: 28px;
+            margin-bottom: 5px;
+        }
+
+        .logo p {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #333;
+            font-weight: 500;
+        }
+
+        input[type="text"],
+        input[type="password"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 5px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        input[type="text"]:focus,
+        input[type="password"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 12px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .attack-buttons {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 2px solid #e0e0e0;
+        }
+
+        .attack-btn {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+            border: 2px solid #ff6b6b;
+            background: white;
+            color: #ff6b6b;
+            border-radius: 5px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .attack-btn:hover {
+            background: #ff6b6b;
+            color: white;
+        }
+
+        .attack-btn.ddos {
+            border-color: #ee5a6f;
+            color: #ee5a6f;
+        }
+
+        .attack-btn.ddos:hover {
+            background: #ee5a6f;
+            color: white;
+        }
+
+        .info {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 5px;
+            font-size: 12px;
+            color: #666;
+        }
+
+        .status {
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 13px;
+            display: none;
+        }
+
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">
+            <h1>🏦 SecureBank</h1>
+            <p>Online Banking Portal</p>
+        </div>
+
+        <form id="loginForm">
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" name="username" placeholder="Enter your username" required>
+            </div>
+
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" placeholder="Enter your password" required>
+            </div>
+
+            <button type="submit" class="btn">Login</button>
+        </form>
+
+        <div id="status" class="status"></div>
+
+        <div class="attack-buttons">
+            <h3 style="margin-bottom: 15px; color: #333; font-size: 16px;">🧪 Attack Simulators</h3>
+            <button class="attack-btn" onclick="simulateSQLi()">💉 SQL Injection Attack</button>
+            <button class="attack-btn ddos" id="ddosBtn" onclick="console.log('Button clicked!'); simulateDDoS(); return false;">💥 DDoS Attack (500+ requests)</button>
+        </div>
+
+        <div class="info">
+            <strong>ℹ️ Demo Mode:</strong> This is a fake login page for testing network security monitoring. 
+            Use the attack buttons to trigger alerts in the ShieldOS dashboard.
+        </div>
+    </div>
+
+    <script>
+        const BACKEND_URL = 'http://localhost:8000';
+
+        // Normal login form submission
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            
+            showStatus('Authenticating...', 'success');
+            
+            try {
+                const response = await fetch(`${BACKEND_URL}/api/login`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ username, password })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showStatus('✅ Login successful! (This is a demo)', 'success');
+                } else {
+                    showStatus('❌ Invalid credentials (This is a demo)', 'error');
+                }
+            } catch (error) {
+                showStatus('⚠️ Connection to server established', 'success');
+            }
+            
+            setTimeout(() => {
+                document.getElementById('loginForm').reset();
+                hideStatus();
+            }, 3000);
+        });
+
+        // SQL Injection attack simulation
+        async function simulateSQLi() {
+            showStatus('🔴 Launching SQL Injection attack...', 'error');
+            
+            const payloads = [
+                { username: "' OR '1'='1", password: "anything" },
+                { username: "admin' --", password: "test" },
+                { username: "' OR 1=1--", password: "test" },
+                { username: "admin' UNION SELECT * FROM users--", password: "test" },
+                { username: "1' OR '1' = '1", password: "test" },
+            ];
+            
+            for (let payload of payloads) {
+                try {
+                    // Send as POST with query string to trigger detection
+                    await fetch(`${BACKEND_URL}/api/login?username=${encodeURIComponent(payload.username)}&password=${encodeURIComponent(payload.password)}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    await new Promise(resolve => setTimeout(resolve, 300));
+                } catch (error) {
+                    // Expected - just generating traffic
+                }
+            }
+            
+            showStatus('✅ SQL Injection attack simulated! Check ShieldOS dashboard.', 'success');
+            setTimeout(hideStatus, 3000);
+        }
+
+        // DDoS attack simulation - MAXIMUM AGGRESSIVE ATTACK
+        async function simulateDDoS() {
+            console.log('🚀🚀🚀 DDoS attack triggered 🚀🚀🚀');
+            showStatus('🔴 Launching MASSIVE DDoS attack... Firing 500+ requests NOW!', 'error');
+            
+            const startTime = performance.now();
+            let requestCounter = 0;
+            const baseUrl = `${BACKEND_URL}/api/health`;
+            
+            try {
+                // Step 1: Immediately trigger backend simulation endpoint (guaranteed alert)
+                fetch(`${BACKEND_URL}/api/simulate-traffic?attack_type=ddos`).catch(() => {});
+                
+                // Step 2: Fire MASSIVE burst of requests as fast as possible
+                // Use multiple techniques in parallel to maximize packet generation
+                
+                // Technique 1: Synchronous fetch loop - fire 300 requests immediately
+                for (let i = 0; i < 300; i++) {
+                    const ts = performance.now();
+                    const unique = `${ts}-${i}-${Math.random().toString(36).substr(2, 5)}`;
+                    fetch(`${baseUrl}?ddos=${i}&ts=${ts}&u=${unique}`, {
+                        method: 'GET',
+                        cache: 'no-store',
+                        mode: 'cors',
+                        credentials: 'omit',
+                        headers: {
+                            'Cache-Control': 'no-cache, no-store, must-revalidate',
+                            'Pragma': 'no-cache',
+                            'X-Request-ID': unique
+                        }
+                    }).catch(() => {});
+                    requestCounter++;
+                }
+                
+                // Technique 2: XMLHttpRequest burst - 100 more requests
+                for (let i = 0; i < 100; i++) {
+                    try {
+                        const xhr = new XMLHttpRequest();
+                        xhr.open('GET', `${baseUrl}?xhr=${i}&_=${Date.now()}-${Math.random()}`, true);
+                        xhr.timeout = 2000;
+                        xhr.withCredentials = false;
+                        xhr.send();
+                        requestCounter++;
+                    } catch (e) {}
+                }
+                
+                // Technique 3: Image loading - creates GET requests (100 more)
+                for (let i = 0; i < 100; i++) {
+                    const img = new Image();
+                    img.src = `${baseUrl}?img=${i}&_=${Date.now()}-${Math.random()}`;
+                    requestCounter++;
+                }
+                
+                // Technique 4: Rapid-fire setTimeout burst over next 300ms
+                for (let i = 0; i < 50; i++) {
+                    setTimeout(() => {
+                        fetch(`${baseUrl}?rapid=${i}&_=${Date.now()}`, {
+                            method: 'GET',
+                            cache: 'no-store'
+                        }).catch(() => {});
+                        requestCounter++;
+                    }, i * 6); // 6ms intervals = 50 requests over 300ms
+                }
+                
+                // Technique 5: Link prefetch (if supported)
+                for (let i = 0; i < 50; i++) {
+                    try {
+                        const link = document.createElement('link');
+                        link.rel = 'prefetch';
+                        link.href = `${baseUrl}?prefetch=${i}&_=${Date.now()}`;
+                        document.head.appendChild(link);
+                        requestCounter++;
+                        // Remove immediately to avoid memory issues
+                        setTimeout(() => link.remove(), 100);
+                    } catch (e) {}
+                }
+                
+                console.log(`Fired ${requestCounter} requests immediately`);
+                
+                // Update status after a moment
+                setTimeout(() => {
+                    const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
+                    console.log(`✅ DDoS complete: ~${requestCounter} requests in ${elapsed}s`);
+                    showStatus(`✅ DDoS attack complete! ~${requestCounter} requests fired in ${elapsed}s. Check ShieldOS dashboard!`, 'success');
+                    setTimeout(hideStatus, 6000);
+                }, 800);
+                
+            } catch (error) {
+                console.error('❌ DDoS simulation error:', error);
+                showStatus('⚠️ Error: ' + error.message, 'error');
+                setTimeout(hideStatus, 3000);
+            }
+        }
+
+        function showStatus(message, type) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.className = `status ${type}`;
+            statusEl.style.display = 'block';
+        }
+
+        function hideStatus() {
+            const statusEl = document.getElementById('status');
+            statusEl.style.display = 'none';
+        }
+        
+        // Ensure DDoS function is globally accessible and add direct event listener
+        window.simulateDDoS = simulateDDoS;
+        
+        // Add click handler directly to ensure it works
+        (function() {
+            const btn = document.getElementById('ddosBtn');
+            if (btn) {
+                btn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    console.log('DDoS button clicked via event listener');
+                    simulateDDoS();
+                });
+            }
+        })();
+    </script>
+</body>
+</html>
