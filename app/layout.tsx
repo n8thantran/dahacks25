@@ -1,8 +1,8 @@
 import './globals.css'
 
 export const metadata = {
-  title: 'Vulnerable Next.js App',
-  description: 'Educational app demonstrating security vulnerabilities',
+  title: 'Meridian Trust Bank - Online Banking',
+  description: 'Secure online banking with Meridian Trust Bank',
 }
 
 export default function RootLayout({
@@ -16,4 +16,3 @@ export default function RootLayout({
     </html>
   )
 }
-

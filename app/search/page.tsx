@@ -5,7 +5,7 @@ import Link from 'next/link';
 
 export default function SearchPage() {
   const [searchTerm, setSearchTerm] = useState('');
-  const [results, setResults] = useState(null);
+  const [results, setResults] = useState<any>(null);
   const [loading, setLoading] = useState(false);
 
   const handleSearch = async (e: React.FormEvent) => {
@@ -55,13 +55,11 @@ export default function SearchPage() {
           </div>
         )}
 
-        <div style={{ marginTop: '20px', padding: '15px', background: '#e7f3ff', borderRadius: '6px' }}>
+        <div className="example-payloads">
           <strong>Try these payloads:</strong>
-          <pre style={{ background: 'white', marginTop: '10px' }}>
-{`test' UNION SELECT username, password FROM users --
+          <pre>{`test' UNION SELECT username, password FROM users --
 ' UNION SELECT 1, 2, 3, 4 FROM users --
-test' AND 1=1 --`}
-          </pre>
+test' AND 1=1 --`}</pre>
         </div>
       </div>
     </div>

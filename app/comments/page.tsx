@@ -7,7 +7,7 @@ export default function CommentsPage() {
   const [postId, setPostId] = useState('1');
   const [userId, setUserId] = useState('1');
   const [comment, setComment] = useState('');
-  const [result, setResult] = useState(null);
+  const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -82,13 +82,11 @@ export default function CommentsPage() {
           </div>
         )}
 
-        <div style={{ marginTop: '20px', padding: '15px', background: '#e7f3ff', borderRadius: '6px' }}>
+        <div className="example-payloads">
           <strong>Try these payloads:</strong>
-          <pre style={{ background: 'white', marginTop: '10px' }}>
-{`Comment: test'); DROP TABLE posts; --
+          <pre>{`Comment: test'); DROP TABLE posts; --
 Comment: '), (1, 1, 'injected'); --
-Comment: '); UPDATE users SET password='hacked'; --`}
-          </pre>
+Comment: '); UPDATE users SET password='hacked'; --`}</pre>
         </div>
       </div>
     </div>

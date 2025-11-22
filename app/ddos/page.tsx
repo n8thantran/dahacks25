@@ -83,7 +83,7 @@ export default function DDoSPage() {
             <pre>{JSON.stringify(results.compute, null, 2)}</pre>
           </div>
         )}
-        <div style={{ marginTop: '10px', padding: '10px', background: '#fff3cd', borderRadius: '6px', fontSize: '14px' }}>
+        <div className="attack-info">
           <strong>Attack:</strong> Send POST with {`{ iterations: 999999999, depth: 100 }`}
         </div>
       </div>

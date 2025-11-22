@@ -6,7 +6,7 @@ import Link from 'next/link';
 export default function UsersPage() {
   const [orderBy, setOrderBy] = useState('id');
   const [limit, setLimit] = useState('10');
-  const [results, setResults] = useState(null);
+  const [results, setResults] = useState<any>(null);
   const [loading, setLoading] = useState(false);
 
   const fetchUsers = async () => {
@@ -65,13 +65,11 @@ export default function UsersPage() {
           </div>
         )}
 
-        <div style={{ marginTop: '20px', padding: '15px', background: '#e7f3ff', borderRadius: '6px' }}>
+        <div className="example-payloads">
           <strong>Try these payloads:</strong>
-          <pre style={{ background: 'white', marginTop: '10px' }}>
-{`Order: id; DROP TABLE users; --
+          <pre>{`Order: id; DROP TABLE users; --
 Order: (SELECT password FROM users LIMIT 1)
-Limit: 10; DELETE FROM users; --`}
-          </pre>
+Limit: 10; DELETE FROM users; --`}</pre>
         </div>
       </div>
     </div>
